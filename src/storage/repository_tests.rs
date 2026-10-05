@@ -15433,6 +15433,122 @@ async fn database_lifecycle_cleanup_is_one_time_and_preserves_retry_state() {
 }
 
 #[tokio::test]
+async fn recurring_cleanup_removes_payloads_of_jobs_cancelled_after_the_upgrade_pass() {
+    let temp_dir = tempfile::tempdir().expect("temporary directory");
+    let config = Config {
+        http_addr: "127.0.0.1:8097".parse().expect("test address"),
+        config_dir: temp_dir.path().join("config"),
+    };
+    let media_root = temp_dir.path().join("Movies");
+    tokio::fs::create_dir_all(&media_root)
+        .await
+        .expect("media root");
+    let database = Database::connect(&config).await.expect("database");
+    let libraries = LibraryService::new(database.clone());
+    let library = libraries
+        .create_library("Recurring cleanup", LibraryKind::Movie, false)
+        .await
+        .expect("library");
+    let root = libraries
+        .add_root(library.id, media_root.to_str().expect("media root"))
+        .await
+        .expect("library root");
+    let root_id = root.root.id.to_string();
+    let library_id = library.id.to_string();
+
+    // The one-time upgrade pass has already run before the job below is cancelled.
+    database
+        .run_database_lifecycle_cleanup()
+        .await
+        .expect("upgrade pass");
+
+    for (job_id, status) in [("cancelled-job", "CANCELLED"), ("running-job", "RUNNING")] {
+        sqlx::query(
+            "INSERT INTO scan_jobs (id, library_id, job_type, status, generation, scan_phase)
+             VALUES (?, ?, 'RECONCILE_LIBRARY', ?, ?, 'IDLE')",
+        )
+        .bind(job_id)
+        .bind(&library_id)
+        .bind(status)
+        .bind(format!("generation-{job_id}"))
+        .execute(database.pool())
+        .await
+        .expect("scan job");
+        // A cancelled manifest keeps whatever state it had reached; it is never COMPLETED.
+        sqlx::query(
+            "INSERT INTO scan_manifests (id, job_id, library_id, state)
+             VALUES (?, ?, ?, 'POSTPROCESSING')",
+        )
+        .bind(format!("manifest-{job_id}"))
+        .bind(job_id)
+        .bind(&library_id)
+        .execute(database.pool())
+        .await
+        .expect("manifest");
+        sqlx::query(
+            "INSERT INTO scan_manifest_roots (manifest_id, library_root_id, state)
+             VALUES (?, ?, 'PENDING')",
+        )
+        .bind(format!("manifest-{job_id}"))
+        .bind(&root_id)
+        .execute(database.pool())
+        .await
+        .expect("manifest root");
+        sqlx::query(
+            "INSERT INTO scan_manifest_seen_paths (manifest_id, library_root_id, relative_path)
+             VALUES (?, ?, 'movie.mkv')",
+        )
+        .bind(format!("manifest-{job_id}"))
+        .bind(&root_id)
+        .execute(database.pool())
+        .await
+        .expect("seen path");
+        sqlx::query(
+            "INSERT INTO reconciliation_scan_entries (
+                job_id, library_root_id, relative_path, entry_type
+             ) VALUES (?, ?, 'movie.mkv', 'FILE')",
+        )
+        .bind(job_id)
+        .bind(&root_id)
+        .execute(database.pool())
+        .await
+        .expect("reconciliation entry");
+    }
+
+    let report = database
+        .run_database_lifecycle_cleanup()
+        .await
+        .expect("recurring cleanup")
+        .expect("cancelled job payload is reclaimed");
+    assert_eq!(report.reconciliation_entries_deleted, 1);
+    assert_eq!(report.scan_manifest_entries_deleted, 1);
+
+    for (table, job_column, expected_cancelled, expected_running) in [
+        ("reconciliation_scan_entries", "job_id", 0_i64, 1_i64),
+        ("scan_manifest_seen_paths", "manifest_id", 0, 1),
+    ] {
+        for (job_id, expected) in [
+            ("cancelled-job", expected_cancelled),
+            ("running-job", expected_running),
+        ] {
+            let value = if job_column == "manifest_id" {
+                format!("manifest-{job_id}")
+            } else {
+                job_id.to_owned()
+            };
+            let remaining: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT COUNT(*) FROM {table} WHERE {job_column} = ?"
+            )))
+            .bind(value)
+            .fetch_one(database.pool())
+            .await
+            .expect("remaining rows");
+            assert_eq!(remaining, expected, "{table} for {job_id}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn reconciliation_batch_commit_is_atomic_and_counts_confirmed_and_missing_entries() {
     let temp_dir = tempfile::tempdir().expect("temporary directory");
     let config = Config {
