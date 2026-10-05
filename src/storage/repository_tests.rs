@@ -12695,6 +12695,89 @@ async fn recurring_cleanup_removes_payloads_of_jobs_cancelled_after_the_upgrade_
 }
 
 #[tokio::test]
+async fn shutdown_cancelled_incremental_changes_are_replayed_once() {
+    let temp_dir = tempfile::tempdir().expect("temporary directory");
+    let config = Config {
+        http_addr: "127.0.0.1:8097".parse().expect("test address"),
+        config_dir: temp_dir.path().join("config"),
+    };
+    let media_root = temp_dir.path().join("Movies");
+    tokio::fs::create_dir_all(&media_root)
+        .await
+        .expect("media root");
+    let database = Database::connect(&config).await.expect("database");
+    let libraries = LibraryService::new(database.clone());
+    let library = libraries
+        .create_library("Replay", LibraryKind::Movie, false)
+        .await
+        .expect("library");
+    let root = libraries
+        .add_root(library.id, media_root.to_str().expect("media root"))
+        .await
+        .expect("library root");
+    let root_id = root.root.id.to_string();
+    let library_id = library.id.to_string();
+
+    for (job_id, error) in [
+        ("shutdown-job", Some("SERVER_SHUTDOWN")),
+        // A cancellation someone asked for must not be undone.
+        ("user-cancelled-job", None),
+    ] {
+        sqlx::query(
+            "INSERT INTO scan_jobs (id, library_id, job_type, status, generation, error)
+             VALUES (?, ?, 'INCREMENTAL_SCAN', 'CANCELLED', ?, ?)",
+        )
+        .bind(job_id)
+        .bind(&library_id)
+        .bind(format!("generation-{job_id}"))
+        .bind(error)
+        .execute(database.pool())
+        .await
+        .expect("cancelled scan job");
+        sqlx::query(
+            "INSERT INTO scan_job_paths (job_id, library_root_id, relative_path, change_kind)
+             VALUES (?, ?, ?, 'CREATE')",
+        )
+        .bind(job_id)
+        .bind(&root_id)
+        .bind(format!("{job_id}/movie.mkv"))
+        .execute(database.pool())
+        .await
+        .expect("queued path");
+    }
+
+    let jobs = ScanJobService::new(database.clone());
+    let replayed = jobs
+        .replay_shutdown_interrupted_incremental_changes()
+        .await
+        .expect("replay");
+    assert_eq!(replayed.len(), 1);
+    let pending = database
+        .list_pending_scan_job_paths(&replayed[0].id, 10)
+        .await
+        .expect("pending paths");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].relative_path, "shutdown-job/movie.mkv");
+
+    let unprocessed: Vec<String> = sqlx::query_scalar(
+        "SELECT job_id FROM scan_job_paths
+         WHERE processed_at IS NULL AND job_id IN ('shutdown-job', 'user-cancelled-job')",
+    )
+    .fetch_all(database.pool())
+    .await
+    .expect("unprocessed paths");
+    assert_eq!(unprocessed, vec!["user-cancelled-job".to_owned()]);
+
+    assert!(
+        jobs.replay_shutdown_interrupted_incremental_changes()
+            .await
+            .expect("second replay")
+            .is_empty(),
+        "a replayed interruption must not be queued again"
+    );
+}
+
+#[tokio::test]
 async fn reconciliation_batch_commit_is_atomic_and_counts_confirmed_and_missing_entries() {
     let temp_dir = tempfile::tempdir().expect("temporary directory");
     let config = Config {

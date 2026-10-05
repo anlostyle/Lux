@@ -6195,6 +6195,67 @@ impl Database {
         })
     }
 
+    /// Paths of incremental scans that the server cancelled on shutdown before they ran. The
+    /// filesystem events that produced them fired once, so nothing would ever queue them again.
+    pub(crate) async fn list_shutdown_interrupted_incremental_paths(
+        &self,
+        created_since: i64,
+        limit: i64,
+    ) -> Result<Vec<StoredInterruptedScanPath>, StorageError> {
+        self.query(
+            "SELECT path.job_id, job.library_id, path.library_root_id, path.relative_path,
+                    path.change_kind
+             FROM scan_job_paths path
+             JOIN scan_jobs job ON job.id = path.job_id
+             WHERE job.job_type = 'INCREMENTAL_SCAN'
+               AND job.status = 'CANCELLED'
+               AND job.error = ?
+               AND job.created_at >= ?
+               AND path.processed_at IS NULL
+             ORDER BY job.created_at, path.created_at, path.relative_path
+             LIMIT ?",
+        )
+        .bind(SHUTDOWN_JOB_ERROR_CODE)
+        .bind(created_since)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| StoredInterruptedScanPath {
+                    job_id: row.get("job_id"),
+                    library_id: row.get("library_id"),
+                    library_root_id: row.get("library_root_id"),
+                    relative_path: row.get("relative_path"),
+                    change_kind: row.get("change_kind"),
+                })
+                .collect()
+        })
+        .map_err(|source| StorageError::Sqlx {
+            path: self.path.clone(),
+            source,
+        })
+    }
+
+    pub(crate) async fn mark_scan_job_paths_replayed(
+        &self,
+        job_id: &str,
+    ) -> Result<(), StorageError> {
+        self.query(
+            "UPDATE scan_job_paths
+             SET processed_at = unixepoch(), updated_at = unixepoch()
+             WHERE job_id = ? AND processed_at IS NULL",
+        )
+        .bind(job_id)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|source| StorageError::Sqlx {
+            path: self.path.clone(),
+            source,
+        })
+    }
+
     pub(crate) async fn mark_scan_job_path_processed(
         &self,
         job_id: &str,

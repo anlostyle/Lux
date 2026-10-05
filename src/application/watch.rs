@@ -231,6 +231,8 @@ impl LibraryWatchService {
             &mut next_token,
         )
         .await;
+        // Watchers are active first so nothing changes unobserved while the replay is queued.
+        self.replay_interrupted_changes(&running_jobs).await;
         let mut refresh_interval = interval(LIBRARY_ROOT_REFRESH_INTERVAL);
         refresh_interval.tick().await;
         let mut library_change_receiver = self.library_change_receiver.clone();
@@ -306,6 +308,54 @@ impl LibraryWatchService {
         }
     }
 
+    async fn spawn_incremental_job(
+        &self,
+        job_id: String,
+        running_jobs: &Arc<Mutex<HashSet<String>>>,
+    ) {
+        let mut running = running_jobs.lock().await;
+        if !running.insert(job_id.clone()) {
+            return;
+        }
+        drop(running);
+        let scan_jobs = self.scan_jobs.clone();
+        let metadata = self.metadata.clone();
+        let running_jobs = Arc::clone(running_jobs);
+        tokio::spawn(async move {
+            if let Err(error) = scan_jobs
+                .run_to_completion_with_metadata(&job_id, 100, None, metadata)
+                .await
+            {
+                tracing::error!(job_id = %job_id, %error, "realtime incremental scan stopped");
+            }
+            running_jobs.lock().await.remove(&job_id);
+        });
+    }
+
+    /// Changes whose scan was cancelled by a restart would otherwise be lost for good.
+    async fn replay_interrupted_changes(&self, running_jobs: &Arc<Mutex<HashSet<String>>>) {
+        match self
+            .scan_jobs
+            .replay_shutdown_interrupted_incremental_changes()
+            .await
+        {
+            Ok(jobs) => {
+                if !jobs.is_empty() {
+                    tracing::info!(
+                        jobs = jobs.len(),
+                        "replaying incremental scans interrupted by shutdown"
+                    );
+                }
+                for job in jobs {
+                    self.spawn_incremental_job(job.id, running_jobs).await;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to replay interrupted incremental scans");
+            }
+        }
+    }
+
     async fn watch_root(&self, root: StoredLibraryRoot, running_jobs: Arc<Mutex<HashSet<String>>>) {
         let root_path = root.canonical_path.clone();
         let mut watcher = match initialize_watcher_on_dedicated_thread(
@@ -350,26 +400,7 @@ impl LibraryWatchService {
                 .enqueue_incremental_changes(library_id, changes)
                 .await
             {
-                Ok(job) => {
-                    let mut running = running_jobs.lock().await;
-                    if !running.insert(job.id.clone()) {
-                        continue;
-                    }
-                    drop(running);
-                    let scan_jobs = self.scan_jobs.clone();
-                    let metadata = self.metadata.clone();
-                    let running_jobs = Arc::clone(&running_jobs);
-                    let job_id = job.id.clone();
-                    tokio::spawn(async move {
-                        if let Err(error) = scan_jobs
-                            .run_to_completion_with_metadata(&job_id, 100, None, metadata)
-                            .await
-                        {
-                            tracing::error!(job_id = %job_id, %error, "realtime incremental scan stopped");
-                        }
-                        running_jobs.lock().await.remove(&job_id);
-                    });
-                }
+                Ok(job) => self.spawn_incremental_job(job.id, &running_jobs).await,
                 Err(error) => {
                     if should_log_realtime_enqueue_error(&error) {
                         tracing::warn!(library_id = %library_id, %error, "realtime incremental scan was not queued");
