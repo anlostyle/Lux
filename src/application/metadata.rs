@@ -1000,9 +1000,15 @@ impl MetadataEnricher {
             match self.enrich_movie_nfo(&source.item_id, &media_path).await {
                 Ok(nfo_report) => {
                     let failed = nfo_report.nfo_failed > 0;
+                    let unparseable = nfo_report.nfo_unparseable > 0;
                     report.merge(nfo_report);
                     if failed {
-                        report.mark_item_failed(&source.item_id);
+                        // A malformed NFO fails identically on every retry; only a file change can fix it.
+                        if unparseable {
+                            report.mark_item_non_retryable_failed(&source.item_id);
+                        } else {
+                            report.mark_item_failed(&source.item_id);
+                        }
                     }
                 }
                 Err(error) => {
@@ -1229,9 +1235,15 @@ impl MetadataEnricher {
             match self.enrich_movie_nfo(&source.item_id, &media_path).await {
                 Ok(nfo_report) => {
                     let failed = nfo_report.nfo_failed > 0;
+                    let unparseable = nfo_report.nfo_unparseable > 0;
                     report.merge(nfo_report);
                     if failed {
-                        report.mark_item_failed(&source.item_id);
+                        // A malformed NFO fails identically on every retry; only a file change can fix it.
+                        if unparseable {
+                            report.mark_item_non_retryable_failed(&source.item_id);
+                        } else {
+                            report.mark_item_failed(&source.item_id);
+                        }
                     }
                 }
                 Err(error) => {
@@ -1276,9 +1288,15 @@ impl MetadataEnricher {
             {
                 Ok(nfo_report) => {
                     let failed = nfo_report.nfo_failed > 0;
+                    let unparseable = nfo_report.nfo_unparseable > 0;
                     report.merge(nfo_report);
                     if failed {
-                        report.mark_item_failed(&source.item_id);
+                        // A malformed NFO fails identically on every retry; only a file change can fix it.
+                        if unparseable {
+                            report.mark_item_non_retryable_failed(&source.item_id);
+                        } else {
+                            report.mark_item_failed(&source.item_id);
+                        }
                     }
                 }
                 Err(error) => {
@@ -1600,9 +1618,15 @@ impl MetadataEnricher {
         match self.enrich_nfo_item(item_id, nfo_path).await {
             Ok(nfo_report) => {
                 let failed = nfo_report.nfo_failed > 0;
+                let unparseable = nfo_report.nfo_unparseable > 0;
                 report.merge(nfo_report);
                 if failed {
-                    report.mark_item_failed(item_id);
+                    // A malformed NFO fails identically on every retry; only a file change can fix it.
+                    if unparseable {
+                        report.mark_item_non_retryable_failed(item_id);
+                    } else {
+                        report.mark_item_failed(item_id);
+                    }
                 }
             }
             Err(error) => {
@@ -1693,6 +1717,7 @@ impl MetadataEnricher {
                         .await?;
                 }
                 report.nfo_failed = 1;
+                report.nfo_unparseable = 1;
                 return Ok(report);
             }
         };
@@ -2096,6 +2121,7 @@ fn local_nfo_defaults_missing(
 pub struct MetadataReport {
     pub nfo_loaded: usize,
     pub nfo_failed: usize,
+    pub nfo_unparseable: usize,
     pub nfo_skipped: usize,
     pub images_found: usize,
     pub items_processed: usize,
@@ -2114,6 +2140,7 @@ impl MetadataReport {
     fn merge(&mut self, other: Self) {
         self.nfo_loaded += other.nfo_loaded;
         self.nfo_failed += other.nfo_failed;
+        self.nfo_unparseable += other.nfo_unparseable;
         self.nfo_skipped += other.nfo_skipped;
         self.images_found += other.images_found;
         self.items_processed += other.items_processed;
