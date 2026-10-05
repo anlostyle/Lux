@@ -1,0 +1,61 @@
+name: Dev build
+
+# Fork-only: builds the luxd binary and web assets for linux/amd64 so they can be
+# overlaid onto an existing runtime image. Never part of an upstream PR.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Build web assets
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Build luxd
+        run: cargo build --release --locked --bin luxd
+
+      - name: Package
+        run: |
+          mkdir -p out
+          cp target/release/luxd out/luxd
+          tar -C web -czf out/web-dist.tar.gz dist
+          ldd out/luxd
+          sha256sum out/luxd out/web-dist.tar.gz | tee out/SHA256SUMS
+          echo "${GITHUB_SHA}" > out/REVISION
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lux-dev-linux-amd64
+          path: out/
+          retention-days: 7
