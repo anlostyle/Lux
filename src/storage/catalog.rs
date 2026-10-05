@@ -27,6 +27,10 @@ fn postgres_recent_catalog_rows_by_library_query(library_count: usize) -> String
     let values = std::iter::repeat_n("(?)", library_count)
         .collect::<Vec<_>>()
         .join(", ");
+    // Movies are limited per library straight off idx_media_items_library_added_visible, so the
+    // cost no longer grows with the number of movies (the previous shape materialised every
+    // visible movie of every requested library just to keep the newest dozen). Series still need
+    // their newest episode date, so all of their candidates are considered.
     format!(
         "WITH episode_latest_by_root AS MATERIALIZED (
              SELECT episode_roots.root_id, MAX(episode.added_at) AS latest_added_at
@@ -41,48 +45,57 @@ fn postgres_recent_catalog_rows_by_library_query(library_count: usize) -> String
              GROUP BY episode_roots.root_id
          ), requested_libraries(library_id) AS (
              SELECT DISTINCT library_id FROM (VALUES {values}) requested(library_id)
-         ), home_candidates AS MATERIALIZED (
-             SELECT mi.id, mi.library_id, mi.sort_title,
-                    CASE WHEN mi.item_type = 'SERIES' THEN COALESCE(
-                        episode_latest_by_root.latest_added_at, mi.added_at
-                    ) ELSE mi.added_at END AS latest_added_at
-             FROM media_items mi
-             JOIN requested_libraries requested ON requested.library_id = mi.library_id
-             JOIN libraries l ON l.id = mi.library_id AND l.is_enabled = 1
-             LEFT JOIN episode_latest_by_root ON episode_latest_by_root.root_id = mi.id
-             WHERE mi.removed_at IS NULL
-               AND (
-                   (mi.item_type IN ('MOVIE', 'SERIES') AND mi.has_available_source = 1)
-                   OR (
-                       mi.item_type = 'SERIES'
-                       AND mi.has_available_source = 0
-                       AND (
-                           EXISTS (
-                               SELECT 1 FROM media_items visible_child
-                               WHERE visible_child.removed_at IS NULL
-                                 AND visible_child.has_available_source = 1
-                                 AND (visible_child.parent_id = mi.id OR visible_child.series_id = mi.id)
-                           )
-                           OR EXISTS (
-                               SELECT 1 FROM collection_items visible_collection_item
-                               JOIN collections visible_collection
-                                 ON visible_collection.id = visible_collection_item.collection_id
-                               JOIN media_items visible_child
-                                 ON visible_child.id = visible_collection_item.item_id
-                               WHERE visible_collection.item_id = mi.id
-                                 AND visible_child.removed_at IS NULL
-                                 AND visible_child.has_available_source = 1
-                           )
-                       )
-                   )
-               )
          ), selected AS (
              SELECT requested.library_id, recent.id, recent.latest_added_at
              FROM requested_libraries requested
+             JOIN libraries l ON l.id = requested.library_id AND l.is_enabled = 1
              CROSS JOIN LATERAL (
                  SELECT candidate.id, candidate.latest_added_at, candidate.sort_title
-                 FROM home_candidates candidate
-                 WHERE candidate.library_id = requested.library_id
+                 FROM (
+                     (SELECT mi.id, mi.added_at AS latest_added_at, mi.sort_title
+                      FROM media_items mi
+                      WHERE mi.library_id = requested.library_id
+                        AND mi.removed_at IS NULL
+                        AND mi.item_type = 'MOVIE'
+                        AND mi.has_available_source = 1
+                      ORDER BY mi.added_at DESC, mi.sort_title, mi.id
+                      LIMIT ?)
+                     UNION ALL
+                     (SELECT mi.id,
+                             COALESCE(episode_latest_by_root.latest_added_at, mi.added_at)
+                                 AS latest_added_at,
+                             mi.sort_title
+                      FROM media_items mi
+                      LEFT JOIN episode_latest_by_root ON episode_latest_by_root.root_id = mi.id
+                      WHERE mi.library_id = requested.library_id
+                        AND mi.removed_at IS NULL
+                        AND mi.item_type = 'SERIES'
+                        AND (
+                            mi.has_available_source = 1
+                            OR (
+                                mi.has_available_source = 0
+                                AND (
+                                    EXISTS (
+                                        SELECT 1 FROM media_items visible_child
+                                        WHERE visible_child.removed_at IS NULL
+                                          AND visible_child.has_available_source = 1
+                                          AND (visible_child.parent_id = mi.id
+                                               OR visible_child.series_id = mi.id)
+                                    )
+                                    OR EXISTS (
+                                        SELECT 1 FROM collection_items visible_collection_item
+                                        JOIN collections visible_collection
+                                          ON visible_collection.id = visible_collection_item.collection_id
+                                        JOIN media_items visible_child
+                                          ON visible_child.id = visible_collection_item.item_id
+                                        WHERE visible_collection.item_id = mi.id
+                                          AND visible_child.removed_at IS NULL
+                                          AND visible_child.has_available_source = 1
+                                    )
+                                )
+                            )
+                        ))
+                 ) candidate
                  ORDER BY candidate.latest_added_at DESC, candidate.sort_title, candidate.id
                  LIMIT ?
              ) recent
@@ -1155,8 +1168,10 @@ impl Database {
         let mut rows = Vec::new();
         for library_ids in library_ids.chunks(500) {
             let (selection_query, binds) = if self.backend == DatabaseBackend::Postgres {
-                let mut binds = Vec::with_capacity(library_ids.len() + 1);
+                let mut binds = Vec::with_capacity(library_ids.len() + 2);
                 binds.extend(library_ids.iter().map(|id| CatalogBind::Text(id)));
+                // One limit for the per-library movie scan, one for the merged result.
+                binds.push(CatalogBind::Integer(limit));
                 binds.push(CatalogBind::Integer(limit));
                 (
                     postgres_recent_catalog_rows_by_library_query(library_ids.len()),
@@ -6976,9 +6991,12 @@ mod tests {
 
         assert!(query.contains("CROSS JOIN LATERAL"));
         assert!(query.contains("VALUES (?), (?)"));
-        assert_eq!(query.matches("LIMIT ?").count(), 1);
+        assert_eq!(query.matches("LIMIT ?").count(), 2);
         assert!(!query.contains("ROW_NUMBER()"));
-        assert!(query.contains("home_candidates AS MATERIALIZED"));
+        assert!(
+            !query.contains("home_candidates"),
+            "movies must be limited per library instead of materialising every candidate"
+        );
     }
 
     #[test]
