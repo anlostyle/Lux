@@ -2523,3 +2523,71 @@ async fn nfo_retry_skips_the_completed_scan_image_stage() -> Result<(), Box<dyn 
     .await??;
     Ok(())
 }
+
+#[tokio::test]
+async fn malformed_local_nfo_is_completed_without_retry_loop()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempfile::tempdir()?;
+    let config = Config {
+        http_addr: "127.0.0.1:8097".parse()?,
+        config_dir: temp_dir.path().join("config"),
+    };
+    let media_root = temp_dir.path().join("Movies");
+    for (directory, file, nfo) in [
+        // Old content overwritten in place by a shorter document leaves a stray tail.
+        (
+            "00 Broken Nfo (2020)",
+            "Broken.Nfo.2020.mkv",
+            "<movie><title>Broken Nfo</title><year>2020</year></movie>\u{30d6}</publisher>\n  <label>x</label>\n</movie>",
+        ),
+        (
+            "01 Good Nfo (2021)",
+            "Good.Nfo.2021.mkv",
+            "<movie><title>Good Nfo From NFO</title><year>2021</year></movie>",
+        ),
+    ] {
+        let movie_dir = media_root.join(directory);
+        tokio::fs::create_dir_all(&movie_dir).await?;
+        tokio::fs::write(movie_dir.join(file), b"movie").await?;
+        tokio::fs::write(movie_dir.join("movie.nfo"), nfo).await?;
+    }
+
+    let database = Database::connect(&config).await?;
+    let libraries = LibraryService::new(database.clone());
+    let library = libraries
+        .create_library("Movies", LibraryKind::Movie, false)
+        .await?;
+    libraries
+        .add_root(
+            library.id,
+            media_root.to_str().ok_or("non-UTF8 media root")?,
+        )
+        .await?;
+
+    let jobs = ScanJobService::new(database.clone());
+    let job = jobs.create_movie_scan_job(library.id).await?;
+    jobs.run_to_completion(&job.id, 100, None).await?;
+
+    let batch: (String, i64) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let batch: (String, i64) = sqlx::query_as(
+                "SELECT status, attempts
+                 FROM scan_local_metadata_batches WHERE job_id = ?",
+            )
+            .bind(&job.id)
+            .fetch_one(database.pool())
+            .await?;
+            if matches!(batch.0.as_str(), "COMPLETED" | "FAILED") {
+                return Ok::<_, sqlx::Error>(batch);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await??;
+    assert_eq!(
+        batch.0, "COMPLETED",
+        "a malformed NFO must not leave the batch in a retry loop"
+    );
+    assert_eq!(batch.1, 1);
+    Ok(())
+}
