@@ -3,6 +3,8 @@ name: Dev build
 # Fork-only: builds the luxd binary and web assets for linux/amd64 so they can be
 # overlaid onto an existing runtime image. Never part of an upstream PR.
 on:
+  push:
+    branches: [dev/lux-opt]
   workflow_dispatch:
 
 permissions:
