@@ -1211,10 +1211,16 @@ impl Database {
         let mut transaction = self.begin_metadata_write_transaction().await?;
         let next_id = self
             .query_scalar::<String>(
-                "SELECT id FROM scan_local_metadata_batches
-                 WHERE status IN ('PENDING', 'FAILED')
-                   AND (next_attempt_at IS NULL OR next_attempt_at <= unixepoch())
-                 ORDER BY created_at, id LIMIT 1",
+                // Batches of cancelled/failed jobs are still worth finishing, but they must not
+                // starve the live job: its post-processing (and every full scan queued behind
+                // it) waits for its own batches, so a stale backlog would otherwise stall the
+                // whole scan pipeline for hours.
+                "SELECT batch.id FROM scan_local_metadata_batches batch
+                 LEFT JOIN scan_jobs job ON job.id = batch.job_id
+                 WHERE batch.status IN ('PENDING', 'FAILED')
+                   AND (batch.next_attempt_at IS NULL OR batch.next_attempt_at <= unixepoch())
+                 ORDER BY CASE WHEN job.status IN ('CANCELLED', 'FAILED') THEN 1 ELSE 0 END,
+                          batch.created_at, batch.id LIMIT 1",
             )
             .fetch_optional(&mut *transaction)
             .await
