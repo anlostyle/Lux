@@ -1312,6 +1312,53 @@ fn sidecar_target_query(values: &str) -> String {
     )
 }
 
+/// PostgreSQL flavour of [`sidecar_target_query`] with the same bind order.
+///
+/// The portable form compares `relative_path` against `directory || '/'` with the database
+/// collation. On PostgreSQL that can neither use an index (the unique index is built with the
+/// database collation, e.g. en_US.utf8, whose ordering ignores punctuation, so the range is not
+/// even a descendant range) nor avoid a hash join over the whole table: on a 7.4M-file library
+/// each call scanned `filesystem_entries` completely (~18 s per 150 directories, repeated for
+/// every batch of a full scan). Driving the lookup from the directories with byte-order range
+/// operators lets `idx_filesystem_entries_dir_prefix` serve each directory (~0.4 s).
+fn postgres_sidecar_target_query(values: &str) -> String {
+    format!(
+        "WITH sidecar_directories(directory) AS (VALUES {values})
+         INSERT INTO scan_job_targets (
+             job_id, target_type, target_id, item_id, change_kind,
+             probe_state, metadata_state, thumbnail_state
+         )
+         SELECT ?, 'ITEM', matched.item_id, matched.item_id, 'SIDECAR',
+                'SKIPPED', 'PENDING', 'PENDING'
+         FROM (
+             SELECT DISTINCT sources.item_id
+             FROM (
+                 SELECT (
+                            SELECT ms.item_id FROM media_sources ms
+                            WHERE ms.filesystem_entry_id = fe.id
+                        ) AS item_id
+                 FROM sidecar_directories sd
+                 CROSS JOIN LATERAL (
+                     SELECT entry.id FROM filesystem_entries entry
+                     WHERE entry.library_root_id = ? AND entry.is_missing = 0
+                       AND entry.entry_kind = 'FILE'
+                       AND (entry.relative_path ~>=~ (sd.directory || '/'))
+                       AND (entry.relative_path ~<~ (sd.directory || '0'))
+                     OFFSET 0
+                 ) fe
+             ) sources
+             WHERE sources.item_id IS NOT NULL
+         ) matched
+         ON CONFLICT(job_id, target_type, target_id) DO UPDATE SET
+             change_kind = 'SIDECAR', metadata_state = 'PENDING', error = NULL,
+             updated_at = unixepoch()
+         WHERE scan_job_targets.change_kind <> 'REMOVED'
+           AND (scan_job_targets.change_kind <> 'SIDECAR'
+                OR scan_job_targets.metadata_state <> 'PENDING'
+                OR scan_job_targets.error IS NOT NULL)"
+    )
+}
+
 fn valid_scan_manifest_transition(expected: &str, next: &str) -> bool {
     matches!(
         (expected, next),
@@ -7039,7 +7086,11 @@ impl Database {
             let values = std::iter::repeat_n("(?)", directory_chunk.len())
                 .collect::<Vec<_>>()
                 .join(", ");
-            let query = sidecar_target_query(&values);
+            let query = if self.backend == DatabaseBackend::Postgres {
+                postgres_sidecar_target_query(&values)
+            } else {
+                sidecar_target_query(&values)
+            };
             let mut statement = self.query(sqlx::AssertSqlSafe(query));
             for directory in directory_chunk {
                 statement = statement.bind(directory);
@@ -11478,7 +11529,7 @@ mod tests {
     use super::{
         Database, MAX_MEDIA_SOURCE_DELETE_BATCH_SIZE, NewScanManifest, NewScanManifestDelta,
         NewScanManifestDiscoveryChunk, NewScanManifestEntry, NewScanManifestRoot,
-        prune_sidecar_directories, sidecar_target_query,
+        postgres_sidecar_target_query, prune_sidecar_directories, sidecar_target_query,
     };
     use crate::config::Config;
 
@@ -12101,6 +12152,23 @@ mod tests {
         assert!(query.contains("fe.relative_path >= sd.directory || '/'"));
         assert!(query.contains("fe.relative_path < sd.directory || '0'"));
         assert!(!query.contains("substr("));
+    }
+
+    #[test]
+    fn postgres_sidecar_target_query_drives_byte_order_ranges_from_the_directories() {
+        let query = postgres_sidecar_target_query("(?), (?)");
+        assert!(query.contains("~>=~ (sd.directory || '/')"));
+        assert!(query.contains("~<~ (sd.directory || '0')"));
+        assert!(
+            query.contains("OFFSET 0"),
+            "the lateral must not be flattened into a hash join"
+        );
+        // Bind order is shared with the portable query: directories, job id, library root.
+        assert_eq!(query.matches('?').count(), 4);
+        let job_bind = query.find("SELECT ?, 'ITEM'").expect("job bind");
+        let root_bind = query.find("entry.library_root_id = ?").expect("root bind");
+        assert!(query.find("VALUES (?), (?)").expect("values") < job_bind);
+        assert!(job_bind < root_bind);
     }
 
     #[test]
