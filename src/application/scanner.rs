@@ -4403,6 +4403,69 @@ impl ScanJobService {
         self.user_events.publish_home_coalesced().await;
     }
 
+    /// Re-queues the changes of incremental scans that were cancelled by a server shutdown.
+    ///
+    /// Realtime filesystem events fire once; if the process stops before the job runs, the
+    /// files stay invisible until the next full scan. Returns the replacement jobs to run.
+    pub async fn replay_shutdown_interrupted_incremental_changes(
+        &self,
+    ) -> Result<Vec<ScanJob>, ScanJobError> {
+        const REPLAY_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
+        const REPLAY_LIMIT: i64 = 50_000;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| {
+                i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+            });
+        let paths = self
+            .database
+            .list_shutdown_interrupted_incremental_paths(now - REPLAY_WINDOW_SECONDS, REPLAY_LIMIT)
+            .await?;
+        // (original job, library) -> changes, preserving the order the paths were queued in.
+        let mut groups: Vec<((String, String), Vec<IncrementalScanChange>)> = Vec::new();
+        for path in paths {
+            let Some(kind) = change_kind_from_name(&path.change_kind) else {
+                continue;
+            };
+            let key = (path.job_id, path.library_id);
+            let change = IncrementalScanChange {
+                root_id: path.library_root_id,
+                relative_path: path.relative_path,
+                kind,
+            };
+            match groups.iter_mut().find(|(group_key, _)| *group_key == key) {
+                Some((_, changes)) => changes.push(change),
+                None => groups.push((key, vec![change])),
+            }
+        }
+        let mut jobs = Vec::new();
+        for ((original_job_id, library_id), changes) in groups {
+            let Ok(library_id) = library_id.parse::<LibraryId>() else {
+                continue;
+            };
+            match self.enqueue_incremental_changes(library_id, changes).await {
+                Ok(job) => {
+                    self.database
+                        .mark_scan_job_paths_replayed(&original_job_id)
+                        .await?;
+                    if !jobs.iter().any(|queued: &ScanJob| queued.id == job.id) {
+                        jobs.push(job);
+                    }
+                }
+                // Nothing valid left to scan (roots removed, paths outside the root).
+                Err(ScanJobError::NoChanges) => {
+                    self.database
+                        .mark_scan_job_paths_replayed(&original_job_id)
+                        .await?;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, job_id = %original_job_id, "interrupted incremental scan could not be replayed");
+                }
+            }
+        }
+        Ok(jobs)
+    }
+
     pub async fn create_path_scan_job(
         &self,
         library_id: LibraryId,
@@ -11417,6 +11480,16 @@ fn media_source_folder(value: &str) -> Result<String, ScanJobError> {
         Ok(".".to_owned())
     } else {
         Ok(folder.to_owned())
+    }
+}
+
+fn change_kind_from_name(name: &str) -> Option<ChangeKind> {
+    match name {
+        "CREATE" => Some(ChangeKind::Create),
+        "MODIFY" => Some(ChangeKind::Modify),
+        "RENAME" => Some(ChangeKind::Rename),
+        "REMOVE" => Some(ChangeKind::Remove),
+        _ => None,
     }
 }
 
