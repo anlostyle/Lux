@@ -10,6 +10,16 @@ const AUDIT_EVENTS_LOG_MIGRATION_MARKER: &str = "audit_events_config_log_migrati
 const CLEANUP_BATCH_SIZE: i64 = 1_000;
 /// Grace period so a batch is never removed while its worker is still finishing it.
 const LOCAL_METADATA_BATCH_RETENTION_SECONDS: i64 = 3_600;
+// Scan payloads are dead weight once their job is terminal. Cancelled jobs (including server
+// shutdowns) leave their manifest in whatever state it had reached, so judge by the job status;
+// failed jobs keep their payload for a week in case someone inspects them.
+const TERMINAL_MANIFEST_PREDICATE: &str = "(manifest.state = 'COMPLETED' OR EXISTS (
+        SELECT 1 FROM scan_jobs terminal_job
+        WHERE terminal_job.id = manifest.job_id
+          AND (terminal_job.status = 'CANCELLED'
+               OR (terminal_job.status = 'FAILED'
+                   AND terminal_job.updated_at < unixepoch() - 604800))
+    ))";
 const MAX_LOG_MIGRATION_BATCH_BYTES: u64 = crate::observability::logs::LOG_SEGMENT_BYTES / 2;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -439,6 +449,8 @@ impl Database {
                 || report.scan_manifest_entries_deleted > 0
                 || report.scan_manifest_directories_deleted > 0
                 || report.scan_local_metadata_batches_deleted > 0
+                || report.reconciliation_entries_deleted > 0
+                || report.scan_job_targets_deleted > 0
             {
                 Ok(Some(report))
             } else {
@@ -541,13 +553,13 @@ impl Database {
         let manifest_payload = self.cleanup_completed_scan_manifest_payloads().await?;
         Ok(DatabaseLifecycleCleanupReport {
             scan_job_paths_deleted: self.delete_completed_scan_job_paths().await?,
-            reconciliation_entries_deleted: self.delete_completed_reconciliation_entries().await?,
+            reconciliation_entries_deleted: manifest_payload.reconciliation_entries_deleted,
             scan_manifest_deltas_deleted: manifest_payload.scan_manifest_deltas_deleted,
             scan_manifest_entries_deleted: manifest_payload.scan_manifest_entries_deleted,
             scan_manifest_directories_deleted: manifest_payload.scan_manifest_directories_deleted,
             scan_local_metadata_batches_deleted: manifest_payload
                 .scan_local_metadata_batches_deleted,
-            scan_job_targets_deleted: self.delete_non_retryable_scan_job_targets().await?,
+            scan_job_targets_deleted: manifest_payload.scan_job_targets_deleted,
             scan_jobs_summarized: self.summarize_terminal_scan_jobs().await?,
         })
     }
@@ -577,11 +589,17 @@ impl Database {
             self.delete_completed_scan_manifest_directories().await?;
         let scan_local_metadata_batches_deleted =
             self.delete_terminal_scan_local_metadata_batches().await?;
+        // These used to be cleaned only by the one-time upgrade pass, so every cancelled job
+        // after that left millions of reconciliation rows behind.
+        let reconciliation_entries_deleted = self.delete_completed_reconciliation_entries().await?;
+        let scan_job_targets_deleted = self.delete_non_retryable_scan_job_targets().await?;
         Ok(DatabaseLifecycleCleanupReport {
+            reconciliation_entries_deleted,
             scan_manifest_deltas_deleted,
             scan_manifest_entries_deleted,
             scan_manifest_directories_deleted,
             scan_local_metadata_batches_deleted,
+            scan_job_targets_deleted,
             ..DatabaseLifecycleCleanupReport::default()
         })
     }
@@ -633,16 +651,17 @@ impl Database {
         let mut deleted = 0_u64;
         loop {
             let count = self
-                .query(
+                .query(sqlx::AssertSqlSafe(format!(
                     "DELETE FROM scan_manifest_deltas
                      WHERE id IN (
                          SELECT delta.id
                          FROM scan_manifest_deltas delta
                          JOIN scan_manifests manifest ON manifest.id = delta.manifest_id
-                         WHERE manifest.state = 'COMPLETED'
+                         WHERE {TERMINAL_MANIFEST_PREDICATE}
                          LIMIT ?
                      )",
-                )
+                    TERMINAL_MANIFEST_PREDICATE = TERMINAL_MANIFEST_PREDICATE
+                )))
                 .bind(CLEANUP_BATCH_SIZE)
                 .execute(&self.pool)
                 .await
@@ -663,16 +682,17 @@ impl Database {
         let mut deleted = 0_u64;
         loop {
             let count = self
-                .query(
+                .query(sqlx::AssertSqlSafe(format!(
                     "DELETE FROM scan_manifest_seen_paths
                      WHERE (manifest_id, library_root_id, relative_path) IN (
                          SELECT seen.manifest_id, seen.library_root_id, seen.relative_path
                          FROM scan_manifest_seen_paths seen
                          JOIN scan_manifests manifest ON manifest.id = seen.manifest_id
-                         WHERE manifest.state = 'COMPLETED'
+                         WHERE {TERMINAL_MANIFEST_PREDICATE}
                          LIMIT ?
                      )",
-                )
+                    TERMINAL_MANIFEST_PREDICATE = TERMINAL_MANIFEST_PREDICATE
+                )))
                 .bind(CLEANUP_BATCH_SIZE)
                 .execute(&self.pool)
                 .await
@@ -693,17 +713,18 @@ impl Database {
         let mut deleted = 0_u64;
         loop {
             let count = self
-                .query(
+                .query(sqlx::AssertSqlSafe(format!(
                     "DELETE FROM scan_manifest_entries
                      WHERE (manifest_id, library_root_id, relative_path, observation_sequence) IN (
                          SELECT entry.manifest_id, entry.library_root_id, entry.relative_path,
                                 entry.observation_sequence
                          FROM scan_manifest_entries entry
                          JOIN scan_manifests manifest ON manifest.id = entry.manifest_id
-                         WHERE manifest.state = 'COMPLETED'
+                         WHERE {TERMINAL_MANIFEST_PREDICATE}
                          LIMIT ?
                      )",
-                )
+                    TERMINAL_MANIFEST_PREDICATE = TERMINAL_MANIFEST_PREDICATE
+                )))
                 .bind(CLEANUP_BATCH_SIZE)
                 .execute(&self.pool)
                 .await
@@ -724,17 +745,18 @@ impl Database {
         let mut deleted = 0_u64;
         loop {
             let count = self
-                .query(
+                .query(sqlx::AssertSqlSafe(format!(
                     "DELETE FROM scan_manifest_directories
                      WHERE (manifest_id, library_root_id, relative_path) IN (
                          SELECT directory.manifest_id, directory.library_root_id,
                                 directory.relative_path
                          FROM scan_manifest_directories directory
                          JOIN scan_manifests manifest ON manifest.id = directory.manifest_id
-                         WHERE manifest.state = 'COMPLETED'
+                         WHERE {TERMINAL_MANIFEST_PREDICATE}
                          LIMIT ?
                      )",
-                )
+                    TERMINAL_MANIFEST_PREDICATE = TERMINAL_MANIFEST_PREDICATE
+                )))
                 .bind(CLEANUP_BATCH_SIZE)
                 .execute(&self.pool)
                 .await
