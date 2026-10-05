@@ -1110,6 +1110,73 @@ async fn changed_sidecar_target_requeues_completed_local_metadata() {
 }
 
 #[tokio::test]
+async fn live_job_metadata_batches_are_claimed_before_cancelled_job_backlog() {
+    let temp_dir = tempfile::tempdir().expect("temporary directory");
+    let config = Config {
+        http_addr: "127.0.0.1:8097".parse().expect("test address"),
+        config_dir: temp_dir.path().join("config"),
+    };
+    let media_root = temp_dir.path().join("Movies");
+    tokio::fs::create_dir_all(&media_root)
+        .await
+        .expect("media root");
+    let database = Database::connect(&config).await.expect("database");
+    let libraries = LibraryService::new(database.clone());
+    let library = libraries
+        .create_library("Batch priority", LibraryKind::Movie, false)
+        .await
+        .expect("library");
+    let root = libraries
+        .add_root(library.id, media_root.to_str().expect("media root"))
+        .await
+        .expect("library root");
+    let root_id = root.root.id.to_string();
+    for (job_id, status) in [("old-job", "CANCELLED"), ("live-job", "RUNNING")] {
+        sqlx::query(
+            "INSERT INTO scan_jobs (id, library_id, job_type, status, generation)
+             VALUES (?, ?, 'INCREMENTAL_SCAN', ?, 'generation')",
+        )
+        .bind(job_id)
+        .bind(library.id.to_string())
+        .bind(status)
+        .execute(database.pool())
+        .await
+        .expect("scan job");
+    }
+    let sources = vec!["source-a".to_owned()];
+    // The cancelled job's batch is older, so plain FIFO order would claim it first.
+    for (id, job_id) in [("stale-batch", "old-job"), ("live-batch", "live-job")] {
+        database
+            .enqueue_scan_local_metadata_batch(NewScanLocalMetadataBatch {
+                id,
+                job_id,
+                library_root_id: &root_id,
+                batch_sequence: 0,
+                source_ids: &sources,
+            })
+            .await
+            .expect("enqueue batch");
+    }
+    sqlx::query("UPDATE scan_local_metadata_batches SET created_at = 1 WHERE id = 'stale-batch'")
+        .execute(database.pool())
+        .await
+        .expect("age stale batch");
+
+    let first = database
+        .claim_next_scan_local_metadata_batch()
+        .await
+        .expect("claim")
+        .expect("live batch");
+    assert_eq!(first.id, "live-batch");
+    let second = database
+        .claim_next_scan_local_metadata_batch()
+        .await
+        .expect("claim")
+        .expect("stale batch is still processed afterwards");
+    assert_eq!(second.id, "stale-batch");
+}
+
+#[tokio::test]
 async fn progressive_scan_metadata_batches_are_bounded_idempotent_and_recoverable() {
     let temp_dir = tempfile::tempdir().expect("temporary directory");
     let config = Config {
