@@ -1529,6 +1529,15 @@ pub(crate) struct StoredScanJobPath {
     pub(crate) change_kind: String,
 }
 
+#[derive(Debug)]
+pub(crate) struct StoredInterruptedScanPath {
+    pub(crate) job_id: String,
+    pub(crate) library_id: String,
+    pub(crate) library_root_id: String,
+    pub(crate) relative_path: String,
+    pub(crate) change_kind: String,
+}
+
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct StoredScanJobCounts {
     pub(crate) running: i64,
