@@ -68,6 +68,10 @@ pub struct CatalogService {
 
 const LIBRARY_PAGE_CACHE_TTL: Duration = Duration::from_secs(15);
 const LIBRARY_PAGE_REFRESH_DEBOUNCE: Duration = Duration::from_secs(2);
+// Same idea as the home cache: never spend more than ~25% of the time rebuilding pages that a
+// running scan is about to invalidate again.
+const LIBRARY_PAGE_REFRESH_COOLDOWN_FACTOR: u32 = 3;
+const LIBRARY_PAGE_REFRESH_MAX_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_LIBRARY_PAGE_CACHE_ENTRIES: usize = 256;
 // Cold pages are refreshed on demand; the background worker keeps only hot pages warm.
 const MAX_LIBRARY_PAGE_REFRESH_ENTRIES: usize = 64;
@@ -240,7 +244,13 @@ impl LibraryPageCache {
                     search_flights: search_flights.clone(),
                     recommendation_compute_lock: Arc::new(Mutex::new(())),
                 };
+                let started = Instant::now();
                 cache.refresh_entries(&service).await;
+                let cooldown = started
+                    .elapsed()
+                    .saturating_mul(LIBRARY_PAGE_REFRESH_COOLDOWN_FACTOR)
+                    .min(LIBRARY_PAGE_REFRESH_MAX_COOLDOWN);
+                tokio::time::sleep(cooldown).await;
             }
         });
         cache

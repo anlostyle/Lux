@@ -19,6 +19,11 @@ use crate::application::{
 const HOME_USER_CACHE_TTL: Duration = Duration::from_secs(15);
 const HOME_REFRESH_DEBOUNCE: Duration = Duration::from_secs(2);
 const HOME_INVALIDATION_DEBOUNCE: Duration = Duration::from_millis(100);
+// A rebuild of every cached home page costs seconds on a large library. While a scan invalidates
+// the catalog continuously, rebuilding back to back kept the database ~50% busy with work that
+// is thrown away a second later, so idle for a multiple of the last rebuild before the next one.
+const HOME_REFRESH_COOLDOWN_FACTOR: u32 = 3;
+const HOME_REFRESH_MAX_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_HOME_CACHE_ENTRIES: usize = 256;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -138,7 +143,13 @@ impl HomeService {
                     break;
                 };
                 inner.refresh_pending.store(false, Ordering::Release);
+                let started = std::time::Instant::now();
                 (Self { inner }).refresh_cached_entries(false).await;
+                let cooldown = started
+                    .elapsed()
+                    .saturating_mul(HOME_REFRESH_COOLDOWN_FACTOR)
+                    .min(HOME_REFRESH_MAX_COOLDOWN);
+                tokio::time::sleep(cooldown).await;
             }
         });
         let service = Self { inner };
