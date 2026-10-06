@@ -3017,7 +3017,7 @@ impl Database {
              ORDER BY conflicting_item.id
              LIMIT 1",
         )
-        .bind(sort_title)
+        .bind(bounded_sort_title(sort_title))
         .bind(production_year)
         .bind(item_id)
         .fetch_optional(&self.pool)
@@ -3604,7 +3604,7 @@ impl Database {
              WHERE id = ?",
         )
         .bind(title)
-        .bind(title.to_ascii_lowercase())
+        .bind(bounded_sort_title(title))
         .bind(title)
         .bind(overview)
         .bind(&item_id)
