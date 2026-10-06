@@ -1025,3 +1025,64 @@ async fn media_catalog_migration_creates_expected_tables() -> Result<(), Box<dyn
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn unchanged_variant_file_keeps_its_enriched_item_across_rescans()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempfile::tempdir()?;
+    let config = Config {
+        http_addr: "127.0.0.1:8097".parse()?,
+        config_dir: temp_dir.path().join("config"),
+    };
+    let root = temp_dir.path().join("Movies");
+    let movie_dir = root.join("FC2-1234567");
+    tokio::fs::create_dir_all(&movie_dir).await?;
+    // A base file and its "-4K" sibling are variants of one release.
+    tokio::fs::write(movie_dir.join("FC2-1234567-无码.mkv"), b"base").await?;
+    tokio::fs::write(movie_dir.join("FC2-1234567-无码-4K.mkv"), b"uhd").await?;
+
+    let database = Database::connect(&config).await?;
+    let libraries = LibraryService::new(database.clone());
+    let library = libraries
+        .create_library("Movies", LibraryKind::Movie, false)
+        .await?;
+    libraries
+        .add_root(library.id, root.to_str().ok_or("non-utf8 root")?)
+        .await?;
+    let jobs = ScanJobService::new(database.clone());
+    let first = jobs.create_movie_scan_job(library.id).await?;
+    jobs.run_to_completion(&first.id, 100, None).await?;
+
+    let variant_item_id: String = sqlx::query_scalar(
+        "SELECT ms.item_id FROM media_sources ms
+         JOIN filesystem_entries fe ON fe.id = ms.filesystem_entry_id
+         WHERE fe.relative_path LIKE '%-4K.mkv'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    // NFO enrichment replaces the filename-derived title with the scraped one.
+    sqlx::query("UPDATE media_items SET title = ?, sort_title = ? WHERE id = ?")
+        .bind("Scraped Title From NFO")
+        .bind("scraped title from nfo")
+        .bind(&variant_item_id)
+        .execute(database.pool())
+        .await?;
+
+    let second = jobs.create_movie_scan_job(library.id).await?;
+    jobs.run_to_completion(&second.id, 100, None).await?;
+
+    let still_attached: (Option<i64>, String) = sqlx::query_as(
+        "SELECT item.removed_at, item.title
+         FROM media_items item
+         JOIN media_sources ms ON ms.item_id = item.id
+         JOIN filesystem_entries fe ON fe.id = ms.filesystem_entry_id
+         WHERE fe.relative_path LIKE '%-4K.mkv' AND item.id = ?",
+    )
+    .bind(&variant_item_id)
+    .fetch_one(database.pool())
+    .await
+    .map_err(|error| format!("the variant source was moved off its enriched item: {error}"))?;
+    assert_eq!(still_attached.0, None, "the enriched item must stay active");
+    assert_eq!(still_attached.1, "Scraped Title From NFO");
+    Ok(())
+}
