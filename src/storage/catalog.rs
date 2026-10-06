@@ -5619,6 +5619,9 @@ impl Database {
         &self,
         update: MediaMetadataUpdate<'_>,
     ) -> Result<(), StorageError> {
+        // `CAST(? AS DOUBLE PRECISION)` below: PostgreSQL cannot infer the type of a bare
+        // `? IS NOT NULL` parameter and rejects the binary float ("incorrect binary data
+        // format"), which failed every item whose NFO carries a rating.
         let sort_title = bounded_sort_title(update.title);
         let _write_guard = self.acquire_metadata_write_lock().await;
         let mut transaction = self.begin_metadata_write_transaction().await?;
@@ -5645,7 +5648,7 @@ impl Database {
                    OR overview IS DISTINCT FROM ?
                    OR production_year IS DISTINCT FROM ?
                    OR (? IS NOT NULL AND premiere_date IS DISTINCT FROM ?)
-                   OR (? IS NOT NULL AND rating IS DISTINCT FROM ?)
+                   OR (CAST(? AS DOUBLE PRECISION) IS NOT NULL AND rating IS DISTINCT FROM ?)
                    OR (? IS NOT NULL AND rating_source IS DISTINCT FROM ?)
                    OR (? IS NOT NULL AND provider_ids_json IS DISTINCT FROM ?)
                    OR metadata_fingerprint IS DISTINCT FROM ?
