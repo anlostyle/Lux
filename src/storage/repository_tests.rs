@@ -2112,6 +2112,16 @@ async fn changed_sidecar_target_requeues_completed_local_metadata() {
     assert_eq!(updated_at, 1);
 }
 
+#[test]
+fn sort_titles_are_lowercased_and_bounded_below_the_index_row_limit() {
+    assert_eq!(bounded_sort_title("Some TITLE"), "some title");
+    let huge = "\u{4e2d}".repeat(5_000);
+    let bounded = bounded_sort_title(&huge);
+    assert_eq!(bounded.chars().count(), 512);
+    // PostgreSQL rejects btree rows above ~2.7 kB; a 3-byte character title must stay far below.
+    assert!(bounded.len() < 2_000);
+}
+
 #[tokio::test]
 async fn live_job_metadata_batches_are_claimed_before_cancelled_job_backlog() {
     let temp_dir = tempfile::tempdir().expect("temporary directory");

@@ -5581,7 +5581,7 @@ impl Database {
                AND (provider_ids_json IS NULL OR provider_ids_json = '{}')",
         )
         .bind(title)
-        .bind(sort_title)
+        .bind(bounded_sort_title(sort_title))
         .bind(original_title)
         .bind(production_year)
         .bind(provider_ids_json)
@@ -5762,7 +5762,7 @@ impl Database {
         // instead of an `Option<f64>`: PostgreSQL rejects the optional float in the repeated
         // `? IS NOT NULL` position ("incorrect binary data format in bind parameter 23"),
         // which failed every update of an item whose NFO carries a rating.
-        let sort_title = update.title.to_lowercase();
+        let sort_title = bounded_sort_title(update.title);
         self.query(
             "UPDATE media_items
              SET title = ?,
