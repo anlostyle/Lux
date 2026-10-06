@@ -2454,3 +2454,65 @@ async fn malformed_local_nfo_is_completed_without_retry_loop()
     assert_eq!(batch.1, 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn oversized_nfo_title_keeps_a_bounded_sort_title() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp_dir = tempfile::tempdir()?;
+    let config = Config {
+        http_addr: "127.0.0.1:8097".parse()?,
+        config_dir: temp_dir.path().join("config"),
+    };
+    let media_root = temp_dir.path().join("Movies");
+    let movie_dir = media_root.join("Huge Title (2022)");
+    tokio::fs::create_dir_all(&movie_dir).await?;
+    tokio::fs::write(movie_dir.join("Huge.Title.2022.mkv"), b"movie").await?;
+    // A pasted synopsis in <title> makes the sort key larger than a PostgreSQL index row allows.
+    let huge_title = "x".repeat(4_000);
+    tokio::fs::write(
+        movie_dir.join("movie.nfo"),
+        format!("<movie><title>{huge_title}</title><year>2022</year></movie>"),
+    )
+    .await?;
+
+    let database = Database::connect(&config).await?;
+    let libraries = LibraryService::new(database.clone());
+    let library = libraries
+        .create_library("Movies", LibraryKind::Movie, false)
+        .await?;
+    libraries
+        .add_root(
+            library.id,
+            media_root.to_str().ok_or("non-UTF8 media root")?,
+        )
+        .await?;
+    let jobs = ScanJobService::new(database.clone());
+    let job = jobs.create_movie_scan_job(library.id).await?;
+    jobs.run_to_completion(&job.id, 100, None).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let status: String = sqlx::query_scalar(
+                "SELECT status FROM scan_local_metadata_batches WHERE job_id = ?",
+            )
+            .bind(&job.id)
+            .fetch_one(database.pool())
+            .await?;
+            if status == "COMPLETED" {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await??;
+
+    let (title_chars, sort_chars): (i64, i64) = sqlx::query_as(
+        "SELECT LENGTH(title), LENGTH(sort_title) FROM media_items
+         WHERE library_id = ? AND item_type = 'MOVIE'",
+    )
+    .bind(library.id.to_string())
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(title_chars, 4_000);
+    assert_eq!(sort_chars, 512);
+    Ok(())
+}
