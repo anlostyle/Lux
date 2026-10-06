@@ -5577,7 +5577,7 @@ impl Database {
                AND (provider_ids_json IS NULL OR provider_ids_json = '{}')",
         )
         .bind(title)
-        .bind(sort_title)
+        .bind(bounded_sort_title(sort_title))
         .bind(original_title)
         .bind(production_year)
         .bind(provider_ids_json)
@@ -5619,7 +5619,7 @@ impl Database {
         &self,
         update: MediaMetadataUpdate<'_>,
     ) -> Result<(), StorageError> {
-        let sort_title = update.title.to_lowercase();
+        let sort_title = bounded_sort_title(update.title);
         let _write_guard = self.acquire_metadata_write_lock().await;
         let mut transaction = self.begin_metadata_write_transaction().await?;
         self.query(

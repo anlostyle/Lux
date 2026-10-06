@@ -307,6 +307,22 @@ pub(crate) fn recommendation_batch_key_at(unix_timestamp: i64) -> i64 {
     (unix_timestamp - 2 * 60 * 60).div_euclid(86_400)
 }
 
+/// Longest `sort_title` stored, in characters.
+///
+/// `sort_title` is part of several btree indexes. PostgreSQL rejects index rows over ~2.7 kB, so
+/// an NFO with a multi-kilobyte title made every write of that item fail; the failure was
+/// retried forever and stalled the whole metadata backlog behind it. 512 characters stay under
+/// the limit even at four bytes per character and are far beyond any sortable title.
+const MAX_SORT_TITLE_CHARS: usize = 512;
+
+pub(crate) fn bounded_sort_title(title: &str) -> String {
+    title
+        .to_lowercase()
+        .chars()
+        .take(MAX_SORT_TITLE_CHARS)
+        .collect()
+}
+
 fn normalize_person_name(value: &str) -> String {
     value
         .trim()
