@@ -1619,7 +1619,7 @@ impl Database {
         &self,
         update: SelectedMetadataUpdate<'_>,
     ) -> Result<bool, StorageError> {
-        let sort_title = update.title.to_lowercase();
+        let sort_title = bounded_sort_title(update.title);
         let _write_guard = self.acquire_metadata_write_lock().await;
         // SQLite WAL can reject a deferred read-to-write upgrade with
         // SQLITE_BUSY_SNAPSHOT; reserve the single writer before this short
