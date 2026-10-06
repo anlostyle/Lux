@@ -4947,12 +4947,19 @@ impl Database {
         Ok(baselines)
     }
 
+    /// Whether an unchanged sibling-variant file is still attached to an active item with the
+    /// variant label the scan would give it.
+    ///
+    /// Only the label is compared. Comparing the filename-derived title (as this used to) is
+    /// wrong for every enriched item: NFO enrichment replaces the title, so the comparison
+    /// failed on each full scan, the file was treated as changed, its item was soft-deleted
+    /// and rebuilt from the filename, and the scraped metadata and images were lost (often
+    /// permanently, when the rebuilt item's NFO then hit an identity conflict). A real change
+    /// of the variant structure (a sibling appears or disappears) changes the label.
     pub(crate) async fn scan_manifest_movie_variant_identity_is_current(
         &self,
         library_root_id: &str,
         relative_path: &str,
-        sort_title: &str,
-        production_year: Option<i64>,
         edition_name: Option<&str>,
     ) -> Result<bool, StorageError> {
         self.query_scalar::<i64>(
@@ -4962,15 +4969,12 @@ impl Database {
              JOIN media_items item ON item.id = source.item_id
              WHERE entry.library_root_id = ? AND entry.relative_path = ?
                AND entry.entry_kind = 'FILE' AND entry.is_missing = 0
-               AND item.removed_at IS NULL AND item.sort_title = ?
-               AND COALESCE(item.production_year, -1) = COALESCE(?, -1)
+               AND item.removed_at IS NULL
                AND COALESCE(source.edition_name, '') = COALESCE(?, '')
              LIMIT 1",
         )
         .bind(library_root_id)
         .bind(relative_path)
-        .bind(sort_title)
-        .bind(production_year)
         .bind(edition_name)
         .fetch_optional(&self.pool)
         .await

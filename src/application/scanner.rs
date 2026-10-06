@@ -5245,8 +5245,6 @@ impl ScanJobService {
                                     .scan_manifest_movie_variant_identity_is_current(
                                         &root.id,
                                         &observation.relative_path,
-                                        &parsed.sort_title,
-                                        parsed.production_year.map(i64::from),
                                         parsed.edition_name.as_deref(),
                                     )
                                     .await?
