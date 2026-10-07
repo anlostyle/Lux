@@ -870,6 +870,7 @@ impl WebhookService {
 pub enum WebhookEventType {
     MediaAdded,
     MediaRemoved,
+    MediaDeleted,
     ScanCompleted,
     ScanFailed,
     MetadataUpdated,
@@ -904,9 +905,10 @@ impl WebhookPayloadFormat {
 }
 
 impl WebhookEventType {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::MediaAdded,
         Self::MediaRemoved,
+        Self::MediaDeleted,
         Self::ScanCompleted,
         Self::ScanFailed,
         Self::MetadataUpdated,
@@ -921,6 +923,7 @@ impl WebhookEventType {
         match self {
             Self::MediaAdded => "MEDIA_ADDED",
             Self::MediaRemoved => "MEDIA_REMOVED",
+            Self::MediaDeleted => "MEDIA_DELETED",
             Self::ScanCompleted => "SCAN_COMPLETED",
             Self::ScanFailed => "SCAN_FAILED",
             Self::MetadataUpdated => "METADATA_UPDATED",
@@ -1330,6 +1333,7 @@ fn emby_event_name(event_type: WebhookEventType) -> &'static str {
     match event_type {
         WebhookEventType::MediaAdded => "library.new",
         WebhookEventType::MediaRemoved => "library.deleted",
+        WebhookEventType::MediaDeleted => "library.deleted",
         WebhookEventType::ScanCompleted | WebhookEventType::ScanFailed => "system.notification",
         WebhookEventType::MetadataUpdated => "item.updated",
         WebhookEventType::JobFailed => "system.notification",
@@ -1347,6 +1351,7 @@ fn event_field_allowed(event_type: WebhookEventType, key: &str) -> bool {
             event_type,
             WebhookEventType::MediaAdded
                 | WebhookEventType::MediaRemoved
+                | WebhookEventType::MediaDeleted
                 | WebhookEventType::ScanCompleted
                 | WebhookEventType::ScanFailed
                 | WebhookEventType::MetadataUpdated
@@ -1355,8 +1360,15 @@ fn event_field_allowed(event_type: WebhookEventType, key: &str) -> bool {
         "addedCount" => matches!(event_type, WebhookEventType::MediaAdded),
         "removedCount" => matches!(event_type, WebhookEventType::MediaRemoved),
         "sourceId" | "deletedFileCount" => {
-            matches!(event_type, WebhookEventType::MediaRemoved)
+            matches!(
+                event_type,
+                WebhookEventType::MediaRemoved | WebhookEventType::MediaDeleted
+            )
         }
+        // Paths only travel with MEDIA_DELETED, which a destination must subscribe to
+        // explicitly; every other event keeps the "no local paths" contract.
+        "deletedPaths" | "externalUrl" | "sourceKind" | "rootPath" | "relativePath"
+        | "userInitiated" => matches!(event_type, WebhookEventType::MediaDeleted),
         "itemId"
         | "itemType"
         | "itemName"
@@ -1367,6 +1379,7 @@ fn event_field_allowed(event_type: WebhookEventType, key: &str) -> bool {
             event_type,
             WebhookEventType::MediaAdded
                 | WebhookEventType::MediaRemoved
+                | WebhookEventType::MediaDeleted
                 | WebhookEventType::MetadataUpdated
                 | WebhookEventType::PlaybackStarted
                 | WebhookEventType::PlaybackPaused
@@ -1383,6 +1396,7 @@ fn event_field_allowed(event_type: WebhookEventType, key: &str) -> bool {
         "itemTitle" => matches!(
             event_type,
             WebhookEventType::MediaRemoved
+                | WebhookEventType::MediaDeleted
                 | WebhookEventType::MetadataUpdated
                 | WebhookEventType::PlaybackStarted
                 | WebhookEventType::PlaybackPaused

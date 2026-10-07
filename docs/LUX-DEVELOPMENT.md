@@ -4485,6 +4485,8 @@ adapter；不声称完整兼容 Emby Webhooks 插件的全部 payload/template �
 剧集播放通知的可读标题按“剧名 →（多季时）季号 → 集名”生成；单季剧集隐藏季号，特别篇显示“特别篇”。
 结构化的 `itemTitle` 始终保留集名；缺少剧集关联信息时，可读标题回退到原标题。
 
+二开扩展（dev/lux-opt）：新增 `MEDIA_DELETED`，只在用户通过管理 API 或 Emby `DELETE /Items/{id}` 主动删除来源时发布（每个来源一条，扫描清理不会发），目的地必须显式订阅（事件列表为空表示订阅全部，包含该事件）。除 MEDIA_REMOVED 的字段外，额外携带 `sourceKind`、`externalUrl`（来源的云端目标）、`rootPath`、`relativePath`、`deletedPaths`（已删除文件的库内相对路径）和 `userInitiated: true`，供外部系统联动处理云端文件。这是对上述“不包含本地路径”约定的有意例外，仅此事件。
+
 验收：
 
 - [x] 从空 SQLite 和 PostgreSQL 数据库运行 migration，建立通知目标、事件和投递状态表。
