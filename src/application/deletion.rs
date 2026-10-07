@@ -113,7 +113,24 @@ impl MediaDeleteService {
 
         let mut paths = Vec::new();
         let mut seen_paths = HashSet::new();
+        // Remote target and kind of each source, captured before the rows are removed so the
+        // MEDIA_DELETED event can name the cloud file the user chose to delete.
+        let mut source_info = Vec::with_capacity(sources.len());
         for source in &sources {
+            let info = if self.webhooks.is_some() {
+                self.database
+                    .find_media_source_external_info(&source.source_id)
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+            source_info.push(info);
+        }
+        let mut deleted_paths_by_source = vec![Vec::<String>::new(); sources.len()];
+        for (source_index, source) in sources.iter().enumerate() {
+            let paths_start = paths.len();
             let root = fs::canonicalize(&source.root_path).await?;
             let relative_path = PathBuf::from(&source.relative_path);
             if relative_path.is_absolute()
@@ -175,6 +192,11 @@ impl MediaDeleteService {
                     paths.push(canonical);
                 }
             }
+            deleted_paths_by_source[source_index] = paths[paths_start..]
+                .iter()
+                .filter_map(|path| path.strip_prefix(&root).ok())
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect();
         }
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -226,7 +248,41 @@ impl MediaDeleteService {
             deleted_file_count: paths.len(),
         };
         if let Some(webhooks) = self.webhooks.as_ref() {
-            for source in &sources {
+            for (source_index, source) in sources.iter().enumerate() {
+                let (source_kind, external_url) = match source_info[source_index].as_ref() {
+                    Some((kind, url)) => (Some(kind.as_str()), url.as_deref()),
+                    None => (None, None),
+                };
+                // Unlike MEDIA_REMOVED (also raised by scans, no paths), this event only exists
+                // for a deletion a user asked for and carries the paths an external system needs.
+                let deleted_key = format!("media-deleted:{}:{}", source.item_id, source.source_id);
+                if let Err(_error) = webhooks
+                    .publish(
+                        WebhookEventType::MediaDeleted,
+                        &deleted_key,
+                        unix_now(),
+                        json!({
+                            "itemId": source.item_id.as_str(),
+                            "sourceId": source.source_id.as_str(),
+                            "itemTitle": item_title.as_deref(),
+                            "libraryName": library_name.as_deref(),
+                            "sourceKind": source_kind,
+                            "externalUrl": external_url,
+                            "rootPath": source.root_path.as_str(),
+                            "relativePath": source.relative_path.as_str(),
+                            "deletedPaths": deleted_paths_by_source[source_index],
+                            "deletedFileCount": report.deleted_file_count,
+                            "userInitiated": true,
+                        }),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        item_id = %source.item_id,
+                        event_type = WebhookEventType::MediaDeleted.as_str(),
+                        "failed to enqueue webhook event"
+                    );
+                }
                 let dedupe_key = format!("media-removed:{}:{}", source.item_id, source.source_id);
                 if let Err(_error) = webhooks
                     .publish(
