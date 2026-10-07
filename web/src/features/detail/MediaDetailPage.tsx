@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, Heart, Play, Radio, Sparkles, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { LuxSelect } from "../../components/LuxSelect";
 import { api } from "../../lib/api/client";
 import { queryKeys, queryRefreshIntervals } from "../../lib/api/query-keys";
@@ -14,12 +14,13 @@ import { MediaImageEditor } from "../media/MediaImageEditor";
 import { MediaIdentifier } from "../media/MediaIdentifier";
 import { MediaMetadataEditor } from "../media/MediaMetadataEditor";
 import { MediaSubtitleEditor } from "../media/MediaSubtitleEditor";
-import { MediaDeleteDialog } from "../media/MediaDeleteDialog";
+import { MediaDeleteDialog, type MediaDeleteResult } from "../media/MediaDeleteDialog";
 import { LuxLogo } from "../../components/LuxLogo";
 
 export function MediaDetailPage() {
   const { itemId = "" } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
   const pendingReview = searchParams.get("metadataStatus")?.toUpperCase() === "PENDING";
   const queryClient = useQueryClient();
@@ -120,6 +121,24 @@ export function MediaDetailPage() {
       setActionNotice("没有可播放的单集。");
     }
   }, [episodeLookupPending, navigate, nextPlayableEpisodeId, playRequested]);
+
+  function afterDelete(result: MediaDeleteResult) {
+    const goneItemId = result.remaining > 0 ? undefined : itemId;
+    // Refresh lists and the home page, but do not refetch an item that no longer exists.
+    void queryClient.invalidateQueries({
+      predicate: (query) => !(goneItemId && query.queryKey[0] === "item" && query.queryKey[1] === goneItemId),
+    });
+    if (result.remaining > 0) {
+      // Only one version went away: stay here and fall back to a remaining version.
+      setSelectedSourceId(undefined);
+      setActionError(undefined);
+      setActionNotice(`已删除版本${result.versionLabel ? ` ${result.versionLabel}` : ""}，还剩 ${result.remaining} 个版本`);
+      return;
+    }
+    // The item is gone: return to where the user came from instead of a fixed page.
+    if (location.key !== "default") navigate(-1);
+    else navigate("/libraries");
+  }
 
   if (item.isPending) return <section className="lux-page-state"><p>正在加载媒体详情…</p></section>;
   if (item.error) return <section className="lux-page-state"><h1>媒体详情加载失败</h1><p>{item.error.message}</p></section>;
@@ -437,7 +456,7 @@ export function MediaDetailPage() {
         void queryClient.invalidateQueries({ queryKey: queryKeys.itemImages(media.id) });
       }} /> : null}
       {editor === "subtitles" ? <MediaSubtitleEditor item={media} sourceId={source?.id} onClose={() => setEditor(undefined)} onSaved={() => void queryClient.invalidateQueries({ queryKey: queryKeys.item(media.id) })} /> : null}
-      {deleteOpen ? <MediaDeleteDialog item={media} onClose={() => setDeleteOpen(false)} onConfirm={() => api.deleteItem(media.id, source?.id)} onDeleted={() => navigate("/libraries")} /> : null}
+      {deleteOpen ? <MediaDeleteDialog item={media} targetSourceId={source?.id} sources={sources} onClose={() => setDeleteOpen(false)} onConfirm={(choice) => choice?.mode === "source" ? api.deleteItem(media.id, choice.sourceId) : choice?.mode === "all" ? api.deleteItem(media.id) : api.deleteItem(media.id, source?.id)} onDeleted={(result) => afterDelete(result)} /> : null}
       {editor === "identify" ? <MediaIdentifier item={media} onClose={() => setEditor(undefined)} onSaved={() => { void queryClient.invalidateQueries({ queryKey: queryKeys.item(media.id) }); void queryClient.invalidateQueries({ queryKey: pendingItemsQueryKey }); }} /> : null}
     </article>
   );
