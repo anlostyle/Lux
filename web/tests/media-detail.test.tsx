@@ -979,6 +979,65 @@ describe("MediaDetailPage series hierarchy", () => {
     expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
 
+  async function renderDeletableDetail(initialEntries: string[]) {
+    vi.spyOn(api, "item").mockResolvedValue({
+      id: "movie-multi",
+      title: "多版本电影",
+      itemType: "MOVIE",
+      mediaSources: [
+        { id: "source-cd1", editionName: "cd1", container: "strm", isDefault: true },
+        { id: "source-cd2", editionName: "cd2", container: "strm", isDefault: false },
+      ],
+    });
+    vi.spyOn(api, "playback").mockResolvedValue({});
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => {
+      root!.render(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={initialEntries} initialIndex={initialEntries.length - 1}>
+            <Routes>
+              <Route path="/" element={<p data-testid="origin">首页</p>} />
+              <Route path="/libraries" element={<p data-testid="libraries">媒体库</p>} />
+              <Route path="items/:itemId" element={<MediaDetailPage />} />
+            </Routes>
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => { container!.querySelector<HTMLButtonElement>('button[aria-label="更多"]')?.click(); });
+    await act(async () => { document.querySelector<HTMLButtonElement>('[data-action="delete"]')?.click(); });
+  }
+
+  it("stays on the detail page and reports the remaining versions after deleting one of several", async () => {
+    const deleteItem = vi.spyOn(api, "deleteItem").mockResolvedValue(undefined);
+    await renderDeletableDetail(["/", "/items/movie-multi"]);
+
+    expect(document.body.textContent).toContain("共有 2 个视频版本");
+    await act(async () => { document.querySelector<HTMLButtonElement>('[data-action="delete-confirm"]')?.click(); });
+
+    expect(deleteItem).toHaveBeenCalledWith("movie-multi", "source-cd1");
+    expect(container!.querySelector('[data-testid="origin"]')).toBeNull();
+    expect(container!.querySelector('[data-testid="libraries"]')).toBeNull();
+    expect(container!.textContent).toContain("已删除版本 cd1");
+    expect(container!.textContent).toContain("还剩 1 个版本");
+  });
+
+  it("returns to the page the user came from after deleting every version", async () => {
+    const deleteItem = vi.spyOn(api, "deleteItem").mockResolvedValue(undefined);
+    await renderDeletableDetail(["/", "/items/movie-multi"]);
+
+    await act(async () => { document.querySelector<HTMLInputElement>('input[value="all"]')?.click(); });
+    await act(async () => { document.querySelector<HTMLButtonElement>('[data-action="delete-confirm"]')?.click(); });
+
+    expect(deleteItem).toHaveBeenCalledWith("movie-multi");
+    expect(container!.querySelector('[data-testid="origin"]')).not.toBeNull();
+    expect(container!.querySelector('[data-testid="libraries"]')).toBeNull();
+  });
+
   it("lets a movie or episode detail choose the source passed to the player", async () => {
     vi.spyOn(api, "item").mockResolvedValue({
       id: "episode-1",
