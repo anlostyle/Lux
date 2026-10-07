@@ -39,6 +39,8 @@ use crate::{
     },
 };
 
+/// A TIMEOUT/FAILED STRM probe is retried by a scheduled run once it is at least this old.
+const STRM_PROBE_RETRY_MIN_AGE_SECONDS: i64 = 20 * 60 * 60;
 const MAX_LIBRARY_COUNT: usize = 64;
 const MAX_CONCURRENCY: i64 = 256;
 const SOURCE_PAGE_SIZE: i64 = 500;
@@ -239,6 +241,22 @@ impl StrmProbeService {
 
     pub async fn create_configured_jobs(&self) -> Result<Vec<StrmProbeJob>, StrmProbeError> {
         let settings = self.plugins.media_info_settings().await?;
+        // Scheduled runs retry earlier TIMEOUT/FAILED sources (cold cloud reads are often only
+        // slow); manual runs keep the explicit behaviour.
+        if !self.database.has_active_strm_probe_jobs().await? {
+            for library_id in &settings.library_ids {
+                if let Err(error) = self
+                    .database
+                    .requeue_stale_strm_probe_failures(
+                        &library_id.to_string(),
+                        STRM_PROBE_RETRY_MIN_AGE_SECONDS,
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %error, "could not requeue failed STRM probe sources");
+                }
+            }
+        }
         self.create_jobs(
             &settings.library_ids,
             StrmProbeOptions {

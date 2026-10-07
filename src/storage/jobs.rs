@@ -8340,6 +8340,34 @@ impl Database {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Puts STRM sources whose last probe timed out or failed back to `PENDING` once the failure is
+    /// older than `min_age_seconds`, so the next scheduled probe retries them. The age gate is the
+    /// backoff: a file that keeps failing is retried at most once per scheduled run, and a fresh
+    /// failure is never retried in the run that just produced it.
+    pub(crate) async fn requeue_stale_strm_probe_failures(
+        &self,
+        library_id: &str,
+        min_age_seconds: i64,
+    ) -> Result<u64, StorageError> {
+        self.query(
+            "UPDATE media_sources
+             SET probe_status = 'PENDING', probe_error = NULL, updated_at = unixepoch()
+             WHERE probe_status IN ('TIMEOUT', 'FAILED')
+               AND source_kind = 'STRM_URL'
+               AND updated_at < unixepoch() - ?
+               AND item_id IN (SELECT id FROM media_items WHERE library_id = ?)",
+        )
+        .bind(min_age_seconds.max(0))
+        .bind(library_id)
+        .execute(&self.pool)
+        .await
+        .map(|result| result.rows_affected())
+        .map_err(|source| StorageError::Sqlx {
+            path: self.path.clone(),
+            source,
+        })
+    }
+
     pub(crate) async fn retry_failed_scan_job_targets(
         &self,
         job_id: &str,
