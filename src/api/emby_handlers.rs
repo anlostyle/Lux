@@ -628,10 +628,10 @@ pub(super) async fn emby_media_updated(
             continue;
         }
         if update.update_type.trim().eq_ignore_ascii_case("modified") {
-            let directory = if tokio::fs::metadata(&path)
+            let is_directory = tokio::fs::metadata(&path)
                 .await
-                .is_ok_and(|metadata| metadata.is_dir())
-            {
+                .is_ok_and(|metadata| metadata.is_dir());
+            let directory = if is_directory {
                 Some(relative_path.to_owned())
             } else {
                 FsPath::new(relative_path)
@@ -646,6 +646,12 @@ pub(super) async fn emby_media_updated(
                     .or_default()
                     .push(directory);
             }
+            // A directory the caller says it only modified (sidecars rewritten) must not be
+            // re-scanned: a path scan re-identifies every file from its name, which rebuilds
+            // items whose title came from an NFO (new item, scraped data and images lost).
+            if is_directory {
+                continue;
+            }
         }
         changes_by_library.entry(library_id).or_default().push(
             crate::application::scanner::IncrementalScanChange {
@@ -655,9 +661,10 @@ pub(super) async fn emby_media_updated(
             },
         );
     }
-    if changes_by_library.is_empty() {
+    if changes_by_library.is_empty() && refresh_by_root.is_empty() {
         return StatusCode::NOT_FOUND.into_response();
     }
+    let refresh_requested = !refresh_by_root.is_empty();
     let mut refreshed_entries = 0_usize;
     for ((library_id, root_id), directories) in refresh_by_root {
         match scan_jobs
@@ -682,7 +689,7 @@ pub(super) async fn emby_media_updated(
             Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
         }
     }
-    if jobs.is_empty() {
+    if jobs.is_empty() && !refresh_requested {
         return StatusCode::NOT_FOUND.into_response();
     }
     for job in &jobs {
@@ -691,7 +698,7 @@ pub(super) async fn emby_media_updated(
     (
         StatusCode::ACCEPTED,
         Json(json!({
-            "scope": "PATH",
+            "scope": if jobs.is_empty() { "LOCAL_METADATA" } else { "PATH" },
             "localMetadataEntries": refreshed_entries,
             "jobs": jobs.iter().map(scan_job_json).collect::<Vec<_>>(),
         })),

@@ -5621,6 +5621,10 @@ impl Database {
         &self,
         update: MediaMetadataUpdate<'_>,
     ) -> Result<(), StorageError> {
+        // The rating comparison below binds the presence flag and a plain f64 (like the SET
+        // clause) instead of an `Option<f64>`: PostgreSQL rejected the optional float with
+        // "incorrect binary data format in bind parameter 23" (with or without a CAST), which
+        // failed every item whose NFO carries a rating.
         let sort_title = bounded_sort_title(update.title);
         let _write_guard = self.acquire_metadata_write_lock().await;
         let mut transaction = self.begin_metadata_write_transaction().await?;
@@ -5647,7 +5651,7 @@ impl Database {
                    OR overview IS DISTINCT FROM ?
                    OR production_year IS DISTINCT FROM ?
                    OR (? IS NOT NULL AND premiere_date IS DISTINCT FROM ?)
-                   OR (? IS NOT NULL AND rating IS DISTINCT FROM ?)
+                   OR (? = 1 AND rating IS DISTINCT FROM ?)
                    OR (? IS NOT NULL AND rating_source IS DISTINCT FROM ?)
                    OR (? IS NOT NULL AND provider_ids_json IS DISTINCT FROM ?)
                    OR metadata_fingerprint IS DISTINCT FROM ?
@@ -5677,8 +5681,8 @@ impl Database {
         .bind(update.production_year)
         .bind(update.premiere_date)
         .bind(update.premiere_date)
-        .bind(update.rating)
-        .bind(update.rating)
+        .bind(database_flag(update.rating.is_some()))
+        .bind(update.rating.unwrap_or_default())
         .bind(update.rating_source)
         .bind(update.rating_source)
         .bind(update.provider_ids_json)
