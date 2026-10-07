@@ -9018,6 +9018,111 @@ async fn movie_batch_insert_updates_strm_poster_fallbacks_as_a_set() {
 }
 
 #[tokio::test]
+async fn stale_strm_probe_failures_are_requeued_but_fresh_ones_are_not() {
+    let temp_dir = tempfile::tempdir().expect("temporary directory");
+    let config = Config {
+        http_addr: "127.0.0.1:8097".parse().expect("test address"),
+        config_dir: temp_dir.path().join("config"),
+    };
+    let database = Database::connect(&config).await.expect("database");
+    let libraries = LibraryService::new(database.clone());
+    let library = libraries
+        .create_library("Movies", LibraryKind::Movie, false)
+        .await
+        .expect("library");
+    let root_path = temp_dir.path().join("media");
+    tokio::fs::create_dir_all(&root_path)
+        .await
+        .expect("media root");
+    let root = libraries
+        .add_root(library.id, root_path.to_str().expect("utf-8 media root"))
+        .await
+        .expect("library root")
+        .root;
+    let files = (1..=3)
+        .map(|index| NewMovieFile {
+            filesystem_entry_id: format!("retry-entry-{index}"),
+            source_id: format!("retry-source-{index}"),
+            relative_path: format!("Retry.{index}.2024.strm"),
+            size: 1,
+            modified_at: index,
+            fingerprint: vec![index as u8],
+            title: format!("Retry {index}"),
+            sort_title: format!("retry {index}"),
+            original_title: format!("Retry {index}"),
+            production_year: Some(2024),
+            provider_ids_json: None,
+            source_kind: "STRM_URL".to_owned(),
+            strm_target_kind: Some("PATH".to_owned()),
+            edition_name: None,
+            quality_label: None,
+            container: "strm".to_owned(),
+            external_url: Some(format!("/CloudNAS/CloudDrive/retry-{index}.mp4")),
+        })
+        .collect::<Vec<_>>();
+    database
+        .insert_movie_files_batch(
+            &library.id.to_string(),
+            &root.id.to_string(),
+            "generation",
+            &files,
+        )
+        .await
+        .expect("batch insert");
+    // source 1: timed out long ago, source 2: failed long ago, source 3: timed out just now.
+    for (id, status, age) in [
+        ("retry-source-1", "TIMEOUT", 48 * 3600),
+        ("retry-source-2", "FAILED", 48 * 3600),
+        ("retry-source-3", "TIMEOUT", 60),
+    ] {
+        sqlx::query(
+            "UPDATE media_sources SET probe_status = ?, probe_error = 'boom',
+                    updated_at = unixepoch() - ? WHERE id = ?",
+        )
+        .bind(status)
+        .bind(age)
+        .bind(id)
+        .execute(database.pool())
+        .await
+        .expect("mark failure");
+    }
+
+    let requeued = database
+        .requeue_stale_strm_probe_failures(&library.id.to_string(), 20 * 3600)
+        .await
+        .expect("requeue");
+    assert_eq!(requeued, 2);
+    let statuses: Vec<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT id, probe_status, probe_error FROM media_sources ORDER BY id")
+            .fetch_all(database.pool())
+            .await
+            .expect("statuses");
+    assert_eq!(
+        statuses[0],
+        ("retry-source-1".to_owned(), "PENDING".to_owned(), None)
+    );
+    assert_eq!(
+        statuses[1],
+        ("retry-source-2".to_owned(), "PENDING".to_owned(), None)
+    );
+    assert_eq!(
+        statuses[2],
+        (
+            "retry-source-3".to_owned(),
+            "TIMEOUT".to_owned(),
+            Some("boom".to_owned())
+        )
+    );
+    assert_eq!(
+        database
+            .requeue_stale_strm_probe_failures(&library.id.to_string(), 20 * 3600)
+            .await
+            .expect("second requeue"),
+        0
+    );
+}
+
+#[tokio::test]
 async fn movie_batch_insert_refreshes_existing_parent_folders_as_a_set() {
     let temp_dir = tempfile::tempdir().expect("temporary directory");
     let config = Config {

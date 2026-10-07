@@ -2171,7 +2171,7 @@ impl PluginService {
         }
         let value = self
             .supervisor
-            .call_isolated(
+            .call_isolated_with_timeout(
                 MEDIA_INFO_PLUGIN_ID,
                 "media.probe",
                 serde_json::json!({
@@ -2180,6 +2180,7 @@ impl PluginService {
                     "includeThumbnail": include_thumbnail,
                     "thumbnailPositionPercent": thumbnail_position_percent,
                 }),
+                crate::application::plugin_runtime::MEDIA_PROBE_CALL_TIMEOUT,
             )
             .await
             .map_err(PluginServiceError::Runtime)?;

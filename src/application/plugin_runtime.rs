@@ -207,6 +207,9 @@ impl From<PluginManifestError> for PluginDiscoveryError {
 }
 
 const DEFAULT_PLUGIN_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Cold reads of large cloud files (CloudDrive/115) regularly take 15-50s for ffprobe plus a frame
+/// grab, so media probing gets a longer budget than ordinary plugin calls.
+pub const MEDIA_PROBE_CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone)]
 pub struct PluginSupervisor {
@@ -352,6 +355,18 @@ impl PluginSupervisor {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, PluginRuntimeError> {
+        self.call_isolated_with_timeout(plugin_id, method, params, self.call_timeout)
+            .await
+    }
+
+    /// Like [`Self::call_isolated`] with an explicit per-call deadline.
+    pub async fn call_isolated_with_timeout(
+        &self,
+        plugin_id: &str,
+        method: &str,
+        params: serde_json::Value,
+        call_timeout: Duration,
+    ) -> Result<serde_json::Value, PluginRuntimeError> {
         let plugin = self
             .catalog
             .read()
@@ -370,7 +385,7 @@ impl PluginSupervisor {
                 return Err(error);
             }
         };
-        let result = process.call(method, params, self.call_timeout).await;
+        let result = process.call(method, params, call_timeout).await;
         process.stop().await;
         if let Err(error) = &result {
             self.record_error(plugin_id, error).await;
