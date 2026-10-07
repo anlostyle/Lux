@@ -51,6 +51,14 @@ fn readable_title(event_type: &str, data: &Map<String, Value>) -> String {
                 format!("{item}已移除")
             }
         }
+        "MEDIA_DELETED" => {
+            let item = string_value(data, "itemTitle");
+            if item.is_empty() {
+                contextual_title("删除媒体", data)
+            } else {
+                format!("{item}已被删除")
+            }
+        }
         "SCAN_COMPLETED" => scan_title("扫描完成", data),
         "SCAN_FAILED" => scan_title("扫描失败", data),
         "METADATA_UPDATED" => {
@@ -140,6 +148,9 @@ fn readable_content(event_type: &str, data: &Map<String, Value>) -> String {
         }
         "MEDIA_REMOVED" => {
             lines.push("媒体已移除".to_owned());
+        }
+        "MEDIA_DELETED" => {
+            lines.push("媒体已被用户删除".to_owned());
         }
         "SCAN_COMPLETED" => lines.push("扫描已完成".to_owned()),
         "SCAN_FAILED" => lines.push("扫描未完成".to_owned()),

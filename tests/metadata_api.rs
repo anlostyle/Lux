@@ -796,6 +796,16 @@ async fn admin_can_delete_a_media_source_and_matching_sidecars()
             Some("webhook-test-secret-1234"),
         )
         .await?;
+    webhooks
+        .create_destination(
+            "Deletion path receiver",
+            "https://example.com/lux-delete-hook",
+            true,
+            false,
+            &["MEDIA_DELETED".to_owned()],
+            Some("webhook-test-secret-5678"),
+        )
+        .await?;
 
     let (base_url, server) = start_server(config, database.clone(), setup, None).await?;
     let client = reqwest::Client::new();
@@ -857,6 +867,37 @@ async fn admin_can_delete_a_media_source_and_matching_sidecars()
     .fetch_one(database.pool())
     .await?;
     assert_eq!(removed_events, 1);
+    // The path-bearing event is separate, user-initiated only, and never reaches the
+    // destination that subscribed to MEDIA_REMOVED alone.
+    let deleted_payload: String = sqlx::query_scalar(
+        "SELECT payload_json FROM notification_events WHERE event_type = 'MEDIA_DELETED'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let deleted: Value = serde_json::from_str(&deleted_payload)?;
+    assert_eq!(deleted["userInitiated"], true);
+    assert_eq!(deleted["itemId"], item_id.as_str());
+    assert_eq!(deleted["sourceId"], source_id.as_str());
+    assert!(
+        deleted["deletedPaths"]
+            .as_array()
+            .is_some_and(|paths| !paths.is_empty())
+    );
+    assert!(deleted["relativePath"].is_string());
+    let removed_payload: String = sqlx::query_scalar(
+        "SELECT payload_json FROM notification_events WHERE event_type = 'MEDIA_REMOVED'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let removed: Value = serde_json::from_str(&removed_payload)?;
+    assert!(removed.get("deletedPaths").is_none());
+    assert!(removed.get("externalUrl").is_none());
+    let deliveries_for_removed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM notification_deliveries d JOIN notification_events e ON e.id = d.event_id WHERE e.event_type = 'MEDIA_DELETED'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(deliveries_for_removed, 1);
 
     server.abort();
     Ok(())
