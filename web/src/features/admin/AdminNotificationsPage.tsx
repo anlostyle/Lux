@@ -7,7 +7,7 @@ import type { AdminPlugin, AdminPluginConfigField, AdminWebhookDelivery, AdminWe
 import "./notifications.css";
 
 const EVENT_OPTIONS = [
-  ["MEDIA_ADDED", "媒体新增"], ["MEDIA_REMOVED", "媒体移除"], ["SCAN_COMPLETED", "扫描完成"],
+  ["MEDIA_ADDED", "媒体新增"], ["MEDIA_REMOVED", "媒体移除"], ["MEDIA_DELETED", "用户删除媒体（含路径）"], ["SCAN_COMPLETED", "扫描完成"],
   ["SCAN_FAILED", "扫描失败"], ["METADATA_UPDATED", "元数据更新"], ["JOB_FAILED", "后台任务失败"],
   ["PLAYBACK_STARTED", "开始播放"], ["PLAYBACK_PAUSED", "暂停播放"], ["PLAYBACK_PROGRESS", "播放进度"],
   ["PLAYBACK_STOPPED", "停止播放"],

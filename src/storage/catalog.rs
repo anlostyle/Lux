@@ -4438,6 +4438,30 @@ impl Database {
         })
     }
 
+    /// Cloud-side target and kind of a media source, read before the source row is deleted so
+    /// the deletion webhook can tell an external system which remote file the user removed.
+    pub(crate) async fn find_media_source_external_info(
+        &self,
+        source_id: &str,
+    ) -> Result<Option<(String, Option<String>)>, StorageError> {
+        self.query("SELECT source_kind, external_url FROM media_sources WHERE id = ?")
+            .bind(source_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map(|row| {
+                row.map(|row| {
+                    (
+                        row.get::<String, _>("source_kind"),
+                        row.get::<Option<String>, _>("external_url"),
+                    )
+                })
+            })
+            .map_err(|source| StorageError::Sqlx {
+                path: self.path.clone(),
+                source,
+            })
+    }
+
     pub(crate) async fn find_deletable_media_source_path_by_id(
         &self,
         item_id: &str,
