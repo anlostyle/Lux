@@ -10,7 +10,7 @@ import { MediaImageEditor } from "../media/MediaImageEditor";
 import { MediaIdentifier } from "../media/MediaIdentifier";
 import { MediaMetadataEditor } from "../media/MediaMetadataEditor";
 import { MediaSubtitleEditor } from "../media/MediaSubtitleEditor";
-import { MediaDeleteDialog } from "../media/MediaDeleteDialog";
+import { MediaDeleteDialog, type MediaDeleteChoice, type MediaDeleteResult } from "../media/MediaDeleteDialog";
 
 export function mediaTitle(item: MediaItem) {
   return item.title || item.name || "未命名媒体";
@@ -125,6 +125,7 @@ export function MediaCard({ item, landscape = false, metadataAttention = false, 
   const [actionNotice, setActionNotice] = useState<string>();
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleted, setDeleted] = useState(false);
+  const [removedSourceIds, setRemovedSourceIds] = useState<string[]>([]);
 
   async function setMetadataLock(locked: boolean) {
     setActionError(undefined);
@@ -156,6 +157,26 @@ export function MediaCard({ item, landscape = false, metadataAttention = false, 
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "媒体库扫描任务提交失败，请重试。");
     }
+  }
+
+  const remainingSources = (item.mediaSources ?? []).filter((source) => !removedSourceIds.includes(source.id));
+  const defaultSourceId = (remainingSources.find((source) => source.isDefault) ?? remainingSources[0])?.id;
+
+  function deleteVersions(choice?: MediaDeleteChoice) {
+    if (choice?.mode === "source") return api.deleteItem(item.id, choice.sourceId);
+    if (choice?.mode === "all") return api.deleteItem(item.id);
+    return api.deleteItem(item.id, defaultSourceId);
+  }
+
+  function afterDelete(result: MediaDeleteResult) {
+    if (result.remaining > 0 && result.sourceId) {
+      // Keep the card: only one version went away, so the others stay playable.
+      setRemovedSourceIds((current) => [...current, result.sourceId as string]);
+      setActionError(undefined);
+      setActionNotice(`已删除版本${result.versionLabel ? ` ${result.versionLabel}` : ""}，还剩 ${result.remaining} 个版本`);
+      return;
+    }
+    setDeleted(true);
   }
 
   if (deleted) return null;
@@ -213,7 +234,7 @@ export function MediaCard({ item, landscape = false, metadataAttention = false, 
       {editor === "metadata" ? <MediaMetadataEditor item={item} onClose={() => setEditor(undefined)} /> : null}
       {editor === "images" ? <MediaImageEditor item={item} onClose={() => setEditor(undefined)} /> : null}
       {editor === "subtitles" ? <MediaSubtitleEditor item={item} onClose={() => setEditor(undefined)} /> : null}
-      {deleteOpen ? <MediaDeleteDialog item={item} onClose={() => setDeleteOpen(false)} onConfirm={() => api.deleteItem(item.id, item.mediaSources?.find((source) => source.isDefault)?.id)} onDeleted={() => setDeleted(true)} /> : null}
+      {deleteOpen ? <MediaDeleteDialog item={item} sources={remainingSources} targetSourceId={defaultSourceId} onClose={() => setDeleteOpen(false)} onConfirm={(choice) => deleteVersions(choice)} onDeleted={(result) => afterDelete(result)} /> : null}
       {editor === "identify" ? <MediaIdentifier item={item} onClose={() => setEditor(undefined)} /> : null}
     </>
   );

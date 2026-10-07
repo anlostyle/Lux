@@ -8,3 +8,7 @@
 .lux-delete-dialog-actions .lux-button { padding: 0 18px; }
 .lux-button-danger { border-color: rgba(243,170,184,.34); color: #fff; background: rgba(170,53,77,.78); }
 .lux-button-danger:hover { border-color: rgba(255,208,218,.58); background: rgba(185,62,87,.95); }
+.lux-delete-dialog-scope { display: grid; gap: 8px; width: 100%; margin: 0; padding: 10px 12px; border: 1px solid rgba(255,255,255,.12); border-radius: 10px; text-align: left; }
+.lux-delete-dialog-scope legend { padding: 0 6px; color: var(--lux-subtle); font-size: .74rem; }
+.lux-delete-dialog-scope label { display: flex; align-items: flex-start; gap: 9px; color: #fff; font-size: .86rem; line-height: 1.5; cursor: pointer; }
+.lux-delete-dialog-scope input { margin-top: 4px; }
