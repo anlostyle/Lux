@@ -15,12 +15,25 @@ const EVENT_OPTIONS = [
 
 type NotificationForm = {
   name: string; url: string; enabled: boolean; allowPrivateNetwork: boolean; eventTypes: string[];
-  providerPluginId: string; providerConfig: Record<string, unknown>; secret: string;
+  providerPluginId: string; providerConfig: Record<string, unknown>; secret: string; payloadFormat: "LUX" | "EMBY";
+};
+
+const BUILTIN_WEBHOOK_ID = "builtin.webhook";
+
+// Lux's built-in HTTP sender is not a plugin, so the provider list never returns it. Offer it as a
+// synthetic provider: it posts the full flat event (including MEDIA_DELETED paths) with an HMAC header.
+const BUILTIN_WEBHOOK_PROVIDER: AdminPlugin = {
+  id: BUILTIN_WEBHOOK_ID,
+  name: "通用 HTTP（内置）",
+  description: "Lux 内置：向接收地址 POST 完整的平铺 JSON 事件，并用 Secret 生成 X-Lux-Signature（HMAC-SHA256）。需要完整字段（如用户删除媒体的路径）时选它。",
+  category: "NOTIFICATION",
+  installed: true, enabled: true, configured: true, available: true, configurable: false,
+  configFields: [], configSource: "NONE",
 };
 
 const EMPTY_FORM: NotificationForm = {
   name: "", url: "", enabled: true, allowPrivateNetwork: false, eventTypes: [],
-  providerPluginId: "", providerConfig: {}, secret: "",
+  providerPluginId: "", providerConfig: {}, secret: "", payloadFormat: "LUX",
 };
 
 export function AdminNotificationsPage() {
@@ -33,9 +46,10 @@ export function AdminNotificationsPage() {
   const createDialogCloseRef = useRef<HTMLButtonElement>(null);
   const [secretNotice, setSecretNotice] = useState<string | null>(null);
   const closeCreateDialog = useCallback(() => setCreateOpen(false), []);
-  const providerItems = useMemo(() => (providers.data?.plugins ?? []).filter((plugin) => plugin.installed && plugin.enabled && plugin.available), [providers.data?.plugins]);
+  const providerItems = useMemo(() => providers.isPending ? [] : [...(providers.data?.plugins ?? []).filter((plugin) => plugin.installed && plugin.enabled && plugin.available), BUILTIN_WEBHOOK_PROVIDER], [providers.data?.plugins, providers.isPending]);
   const selectedProvider = providerItems.find((plugin) => plugin.id === form.providerPluginId) ?? null;
   const selectedProviderOwnsTarget = selectedProvider ? providerOwnsTarget(selectedProvider) : false;
+  const isBuiltinProvider = form.providerPluginId === BUILTIN_WEBHOOK_ID;
 
   useEffect(() => {
     if (providerItems.length === 0 || providerItems.some((plugin) => plugin.id === form.providerPluginId)) return;
@@ -47,8 +61,10 @@ export function AdminNotificationsPage() {
     mutationFn: () => api.createAdminWebhookDestination({
       name: form.name.trim(), url: selectedProviderOwnsTarget ? "" : form.url.trim(), enabled: form.enabled,
       allowPrivateNetwork: form.allowPrivateNetwork, eventTypes: form.eventTypes,
-      payloadFormat: "LUX", providerPluginId: form.providerPluginId, providerConfig: form.providerConfig,
-      ...(form.secret.trim() ? { secret: form.secret.trim() } : {}),
+      payloadFormat: isBuiltinProvider ? form.payloadFormat : "LUX",
+      // The built-in sender is the server default: leave providerPluginId out so Lux picks it.
+      ...(isBuiltinProvider ? {} : { providerPluginId: form.providerPluginId, providerConfig: form.providerConfig }),
+      ...(isBuiltinProvider && form.secret.trim() ? { secret: form.secret.trim() } : {}),
     }),
     onSuccess: (result) => {
       closeCreateDialog();
@@ -90,7 +106,7 @@ export function AdminNotificationsPage() {
         <fieldset className="lux-notification-section"><legend>通知内容</legend><div className="lux-notification-event-grid">{EVENT_OPTIONS.map(([value, label]) => <label key={value} htmlFor={`event-${value}`}><input id={`event-${value}`} name={`event-${value}`} type="checkbox" checked={form.eventTypes.includes(value)} onChange={() => setForm({ ...form, eventTypes: toggleEvent(form.eventTypes, value) })} /><span>{label}</span></label>)}</div><small>不勾选表示接收全部事件。</small></fieldset>
         <fieldset className="lux-notification-section"><legend>通知器</legend>{providers.isPending ? <p className="lux-admin-muted" role="status">正在读取可用通知器…</p> : providers.error ? <p className="lux-error-copy" role="alert">通知器暂时不可用。</p> : providerItems.length === 0 ? <div className="lux-notification-provider-empty"><p>还没有可用的通知器插件。</p><a href="/admin/plugins">前往插件库安装通知器</a></div> : <label htmlFor="notification-provider">选择通知器<select id="notification-provider" name="notification-provider" value={form.providerPluginId} onChange={(event) => { const provider = providerItems.find((item) => item.id === event.target.value); setForm({ ...form, providerPluginId: event.target.value, providerConfig: provider ? defaultProviderConfig(provider) : {} }); }}>{providerItems.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>}{selectedProvider ? <p className="lux-notification-provider-description">{selectedProvider.description || selectedProvider.id}</p> : null}</fieldset>
         {selectedProvider ? <NotificationConfigFields plugin={selectedProvider} values={form.providerConfig} onChange={(providerConfig) => setForm({ ...form, providerConfig })} /> : null}
-        <fieldset className="lux-notification-section"><legend>通知目标</legend><div className="lux-notification-target-grid"><label htmlFor="notification-name">名称<input id="notification-name" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} maxLength={128} required /></label>{!selectedProviderOwnsTarget ? <label htmlFor="notification-url">接收地址<input id="notification-url" type="url" value={form.url} onChange={(event) => setForm({ ...form, url: event.target.value })} placeholder="https://example.com/lux-hook" maxLength={2048} required /></label> : null}{form.providerPluginId === "builtin.webhook" ? <label htmlFor="notification-secret">Secret（可选）<input id="notification-secret" type="password" value={form.secret} onChange={(event) => setForm({ ...form, secret: event.target.value })} autoComplete="new-password" placeholder="留空由 Lux 生成" /></label> : null}</div><label className="lux-admin-toggle"><input type="checkbox" checked={form.allowPrivateNetwork} onChange={(event) => setForm({ ...form, allowPrivateNetwork: event.target.checked })} /><span>允许私有网络地址（仅限可信本地接收器）</span></label><label className="lux-admin-toggle"><input type="checkbox" checked={form.enabled} onChange={(event) => setForm({ ...form, enabled: event.target.checked })} /><span>创建后立即启用</span></label></fieldset>
+        <fieldset className="lux-notification-section"><legend>通知目标</legend><div className="lux-notification-target-grid"><label htmlFor="notification-name">名称<input id="notification-name" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} maxLength={128} required /></label>{!selectedProviderOwnsTarget ? <label htmlFor="notification-url">接收地址<input id="notification-url" type="url" value={form.url} onChange={(event) => setForm({ ...form, url: event.target.value })} placeholder="https://example.com/lux-hook" maxLength={2048} required /></label> : null}{isBuiltinProvider ? <><label htmlFor="notification-payload-format">事件格式<select id="notification-payload-format" value={form.payloadFormat} onChange={(event) => setForm({ ...form, payloadFormat: event.target.value === "EMBY" ? "EMBY" : "LUX" })}><option value="LUX">Lux（完整字段，推荐）</option><option value="EMBY">Emby 兼容</option></select></label><label htmlFor="notification-secret">Secret（可选）<input id="notification-secret" type="password" value={form.secret} onChange={(event) => setForm({ ...form, secret: event.target.value })} autoComplete="new-password" placeholder="留空由 Lux 生成" /></label></> : null}</div><label className="lux-admin-toggle"><input type="checkbox" checked={form.allowPrivateNetwork} onChange={(event) => setForm({ ...form, allowPrivateNetwork: event.target.checked })} /><span>允许私有网络地址（仅限可信本地接收器）</span></label><label className="lux-admin-toggle"><input type="checkbox" checked={form.enabled} onChange={(event) => setForm({ ...form, enabled: event.target.checked })} /><span>创建后立即启用</span></label></fieldset>
         <button className="lux-button lux-button-primary" type="submit" disabled={create.isPending || providerItems.length === 0}>{create.isPending ? "创建中…" : "保存通知"}</button>
         </form>
         {create.error ? <p className="lux-error-copy" role="alert">{create.error.message}</p> : null}

@@ -226,4 +226,56 @@ describe("AdminNotificationsPage", () => {
     expect(container.textContent).toContain("通知器配置");
     expect(container.querySelector('button[aria-label="重试投递 delivery-1"]')).toBeTruthy();
   });
+
+  it("offers the built-in HTTP sender and creates it without a provider plugin id", async () => {
+    const created = vi.spyOn(api, "createAdminWebhookDestination").mockResolvedValue({
+      destination: {
+        id: "destination-2", name: "immortal", url: "http://10.0.0.11:3751/hook", payloadFormat: "LUX",
+        providerPluginId: "builtin.webhook", providerConfig: {}, enabled: true, allowPrivateNetwork: true,
+        eventTypes: ["MEDIA_DELETED"], secretConfigured: true, createdAt: 1, updatedAt: 1,
+      },
+      secret: "lux_wh_generated",
+    });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => {
+      root.render(createElement(
+        QueryClientProvider,
+        { client: queryClient },
+        createElement(MemoryRouter, null, createElement(AdminNotificationsPage)),
+      ));
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => {
+      (container.querySelector('button[aria-label="新建通知"]') as HTMLButtonElement).click();
+    });
+
+    const provider = container.querySelector('select[name="notification-provider"]') as HTMLSelectElement;
+    expect(Array.from(provider.options).map((option) => option.value)).toContain("builtin.webhook");
+    const setValue = (element: HTMLInputElement | HTMLSelectElement, value: string) => {
+      const prototype = element instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(prototype, "value")?.set?.call(element, value);
+      element.dispatchEvent(new Event(element instanceof HTMLSelectElement ? "change" : "input", { bubbles: true }));
+    };
+    await act(async () => { setValue(provider, "builtin.webhook"); });
+
+    expect(container.querySelector('input[name="notification-config-url"]')).toBeNull();
+    expect(container.querySelector("#notification-url")).toBeTruthy();
+    expect(container.querySelector("#notification-secret")).toBeTruthy();
+    expect(container.querySelector("#notification-payload-format")).toBeTruthy();
+
+    await act(async () => {
+      (container.querySelector("#event-MEDIA_DELETED") as HTMLInputElement).click();
+      setValue(container.querySelector("#notification-name") as HTMLInputElement, "immortal");
+      setValue(container.querySelector("#notification-url") as HTMLInputElement, "http://10.0.0.11:3751/hook");
+    });
+    await act(async () => {
+      (container.querySelector(".lux-notification-form") as HTMLFormElement).dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    expect(created).toHaveBeenCalledTimes(1);
+    const body = created.mock.calls[0][0];
+    expect(body).toMatchObject({ name: "immortal", url: "http://10.0.0.11:3751/hook", payloadFormat: "LUX", eventTypes: ["MEDIA_DELETED"] });
+    expect(body.providerPluginId).toBeUndefined();
+    expect(body.secret).toBeUndefined();
+  });
 });
