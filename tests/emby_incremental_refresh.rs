@@ -586,6 +586,14 @@ async fn modified_notification_and_admin_endpoint_refresh_local_metadata_precise
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     let body = response.json::<serde_json::Value>().await?;
     assert_eq!(body["localMetadataEntries"], 1);
+    // The directory was only modified, so no path scan may be queued: a scan re-identifies the
+    // files by name and would rebuild items whose title came from an NFO.
+    assert_eq!(body["scope"], "LOCAL_METADATA");
+    let incremental_jobs: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM scan_jobs WHERE job_type = 'INCREMENTAL_SCAN'")
+            .fetch_one(database.pool())
+            .await?;
+    assert_eq!(incremental_jobs, 0);
     wait_for_posters(1).await??;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     wait_for_posters(1).await??;
@@ -603,10 +611,9 @@ async fn modified_notification_and_admin_endpoint_refresh_local_metadata_precise
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
-    assert_eq!(
-        response.json::<serde_json::Value>().await?["localMetadataEntries"],
-        0
-    );
+    let body = response.json::<serde_json::Value>().await?;
+    assert_eq!(body["localMetadataEntries"], 0);
+    assert_eq!(body["scope"], "PATH");
 
     // The admin endpoint takes library-relative directories.
     let response = client
