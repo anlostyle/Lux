@@ -9017,6 +9017,103 @@ async fn movie_batch_insert_updates_strm_poster_fallbacks_as_a_set() {
     assert_eq!(fallback_count, 2);
 }
 
+#[tokio::test]
+#[ignore = "requires a local PostgreSQL instance"]
+async fn postgres_merges_split_movie_items_into_one_with_all_sources()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_name = format!("lux_test_{}", uuid::Uuid::now_v7().simple());
+    let admin_connection = PostgresConnection {
+        host: std::env::var("POSTGRES_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+        port: std::env::var("POSTGRES_TEST_PORT")
+            .ok()
+            .and_then(|port| port.parse().ok())
+            .unwrap_or(55432),
+        database: "postgres".to_owned(),
+        username: std::env::var("POSTGRES_TEST_USER").unwrap_or_else(|_| "lux".to_owned()),
+        password: std::env::var("POSTGRES_TEST_PASSWORD")
+            .unwrap_or_else(|_| "lux-test-password".to_owned()),
+        ssl_mode: "disable".to_owned(),
+    };
+    let admin_configuration =
+        crate::config::DatabaseConfiguration::Postgres(admin_connection.clone());
+    let admin_url = admin_configuration
+        .postgres_url()?
+        .ok_or("missing PostgreSQL URL")?;
+    let admin_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE DATABASE {database_name}"
+    )))
+    .execute(&admin_pool)
+    .await?;
+    let temp_dir = tempfile::tempdir()?;
+    let config = Config {
+        http_addr: "127.0.0.1:8097".parse()?,
+        config_dir: temp_dir.path().join("config"),
+    };
+    let database = Database::connect_with_configuration(
+        &config,
+        &crate::config::DatabaseConfiguration::Postgres(PostgresConnection {
+            database: database_name.clone(),
+            ..admin_connection
+        }),
+    )
+    .await?;
+
+    let assertions = async {
+        let libraries = LibraryService::new(database.clone());
+        let library = libraries
+            .create_library("Movies", LibraryKind::Movie, false)
+            .await?;
+        let root_path = temp_dir.path().join("media");
+        tokio::fs::create_dir_all(&root_path).await?;
+        let root = libraries
+            .add_root(library.id, root_path.to_str().ok_or("utf-8 media root")?)
+            .await?
+            .root;
+        database
+            .insert_movie_files_batch(
+                &library.id.to_string(),
+                &root.id.to_string(),
+                "g1",
+                &[
+                    part_file(1, "2026/A/A-cd1.strm", "a one"),
+                    part_file(2, "2026/A/A-cd2.strm", "a two"),
+                    part_file(3, "2026/A/A-cd3.strm", "a two"),
+                ],
+            )
+            .await?;
+        let item_ids: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM media_items WHERE item_type = 'MOVIE' ORDER BY id")
+                .fetch_all(database.pool())
+                .await?;
+        assert_eq!(item_ids.len(), 2);
+        let merged = database.merge_media_items(&item_ids[0], &item_ids).await?;
+        assert_eq!(merged.merged_item_ids.len(), 1);
+        let sources: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM media_sources WHERE item_id = $1")
+                .bind(&item_ids[0])
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(sources, 3);
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+
+    database.close().await;
+    let drop_database = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS {database_name}"
+    )))
+    .execute(&admin_pool)
+    .await;
+    admin_pool.close().await;
+    assertions?;
+    drop_database?;
+    Ok(())
+}
+
 fn part_file(index: i64, relative_path: &str, sort_title: &str) -> NewMovieFile {
     NewMovieFile {
         filesystem_entry_id: format!("part-entry-{index}"),
