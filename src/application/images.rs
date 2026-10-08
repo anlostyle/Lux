@@ -1614,6 +1614,10 @@ fn image_language_matches(
     if image_language.is_some_and(|value| value == requested_language) {
         return true;
     }
+    // TMDb tags Cantonese artwork "cn"; it is Chinese artwork for a zh request.
+    if requested_language == "zh" && image_language.is_some_and(|value| value == "cn") {
+        return true;
+    }
     let Some(original_language) = original_language else {
         return false;
     };
@@ -2928,5 +2932,25 @@ mod tests {
         assert!(lookup.iter().any(|stem| stem == "Example.S01E01-fanart1"));
         assert!(lookup.iter().any(|stem| stem == "Example.S01E01-thumb1"));
         assert!(lookup.iter().any(|stem| stem == "Example.S01E01-thumb-1"));
+    }
+}
+
+#[cfg(test)]
+mod image_language_match_tests {
+    use super::image_language_matches;
+
+    #[test]
+    fn chinese_requests_accept_cantonese_tagged_artwork() {
+        assert!(image_language_matches(Some("cn"), Some("zh"), None));
+        assert!(image_language_matches(Some("zh"), Some("zh"), None));
+        assert!(!image_language_matches(Some("cn"), Some("en"), None));
+        assert!(!image_language_matches(Some("ja"), Some("zh"), None));
+    }
+
+    #[test]
+    fn original_language_mode_still_admits_unlabelled_and_english_artwork() {
+        assert!(image_language_matches(None, Some("zh"), Some("ja")));
+        assert!(image_language_matches(Some("en"), Some("zh"), Some("ja")));
+        assert!(!image_language_matches(None, Some("zh"), None));
     }
 }
