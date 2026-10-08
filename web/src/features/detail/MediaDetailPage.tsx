@@ -15,6 +15,7 @@ import { MediaIdentifier } from "../media/MediaIdentifier";
 import { MediaMetadataEditor } from "../media/MediaMetadataEditor";
 import { MediaSubtitleEditor } from "../media/MediaSubtitleEditor";
 import { MediaDeleteDialog, type MediaDeleteResult } from "../media/MediaDeleteDialog";
+import { describeMediaSources } from "../media/mediaSourceLabels";
 import { LuxLogo } from "../../components/LuxLogo";
 
 export function MediaDetailPage() {
@@ -584,12 +585,13 @@ function MediaSourceSelector({
   const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? sources[0];
   const audioStreams = streamsOfType(selectedSource, "AUDIO");
   const subtitleStreams = streamsOfType(selectedSource, "SUBTITLE");
+  const descriptions = describeMediaSources(sources, { qualityLabel: sourceQualityLabel });
   const options = sources.map((source, index) => ({
     value: source.id,
     label: (
       <span className="lux-source-option-content">
-        <span className="lux-source-option-label">{sourceLabel(source, index)}</span>
-        <span className="lux-source-option-detail">{source.editionName || source.container || "DIRECT PLAY"}</span>
+        <span className="lux-source-option-label">{descriptions[index].label}</span>
+        {descriptions[index].detail ? <span className="lux-source-option-detail">{descriptions[index].detail}</span> : null}
       </span>
     ),
   }));
@@ -676,7 +678,7 @@ function MediaTrackSelector({
   );
 }
 
-function sourceLabel(source: MediaSource, index: number) {
+function sourceQualityLabel(source: MediaSource) {
   const videoStream = source.streams?.find((stream) => (stream.type ?? "").toUpperCase() === "VIDEO");
   const qualityTokens = splitSourceInfo(source.qualityLabel);
   const qualityRange = qualityTokens.find(dynamicRangeToken);
@@ -686,7 +688,7 @@ function sourceLabel(source: MediaSource, index: number) {
     dynamicRangeLabel(videoStream) ?? qualityRange,
     bitDepthLabel(videoStream),
   ]);
-  return labels.join(" · ") || source.editionName || `${source.container?.toUpperCase() || "视频"} · 版本 ${index + 1}`;
+  return labels.join(" · ");
 }
 
 function streamsOfType(source: MediaSource | undefined, type: "AUDIO" | "SUBTITLE") {

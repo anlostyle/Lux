@@ -1038,6 +1038,43 @@ describe("MediaDetailPage series hierarchy", () => {
     expect(container!.querySelector('[data-testid="libraries"]')).toBeNull();
   });
 
+  it("labels STRM versions by the part of the file name that differs", async () => {
+    vi.spyOn(api, "item").mockResolvedValue({
+      id: "movie-parts",
+      title: "分段电影",
+      itemType: "MOVIE",
+      mediaSources: [
+        { id: "source-cd2", container: "strm", sourceKind: "STRM_URL", isDefault: true, size: 1_500_000_000, durationTicks: 36_000_000_000, externalUrl: "/CloudNAS/CloudDrive/115/FC2-1-无码-cd2.mp4" },
+        { id: "source-cd3", container: "strm", sourceKind: "STRM_URL", isDefault: false, externalUrl: "/CloudNAS/CloudDrive/115/FC2-1-无码-cd3.mp4" },
+      ],
+    });
+    vi.spyOn(api, "playback").mockResolvedValue({});
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={["/items/movie-parts"]}>
+            <Routes><Route path="items/:itemId" element={<MediaDetailPage />} /></Routes>
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    const select = container.querySelector<HTMLButtonElement>('.lux-source-selector [role="combobox"]');
+    expect(select?.textContent).toContain("cd2");
+    expect(select?.textContent).toContain("1.4 GB");
+    await act(async () => select?.click());
+    const options = [...document.querySelectorAll<HTMLButtonElement>('[role="option"]')].map((option) => option.textContent ?? "");
+    expect(options.some((text) => text.includes("cd2"))).toBe(true);
+    expect(options.some((text) => text.includes("cd3"))).toBe(true);
+    // no probe information for cd3: no empty placeholders
+    expect(options.find((text) => text.includes("cd3"))).not.toMatch(/undefined|null|NaN/);
+  });
+
   it("lets a movie or episode detail choose the source passed to the player", async () => {
     vi.spyOn(api, "item").mockResolvedValue({
       id: "episode-1",
