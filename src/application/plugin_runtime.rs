@@ -210,6 +210,35 @@ const DEFAULT_PLUGIN_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Cold reads of large cloud files (CloudDrive/115) regularly take 15-50s for ffprobe plus a frame
 /// grab, so media probing gets a longer budget than ordinary plugin calls.
 pub const MEDIA_PROBE_CALL_TIMEOUT: Duration = Duration::from_secs(120);
+const MEDIA_PROBE_TIMEOUT_ENV: &str = "LUX_MEDIA_PROBE_TIMEOUT_SECONDS";
+const MEDIA_PROBE_TIMEOUT_MARGIN_SECONDS: u64 = 15;
+
+/// Host-side deadline for one `media.probe` call. It must outlast the plugin's own limits: the
+/// plugin may run ffprobe twice (stream info, then duration) and ffmpeg once, so the floor is
+/// `2 x ffprobe + ffmpeg + margin`; `LUX_MEDIA_PROBE_TIMEOUT_SECONDS` can raise it further.
+pub fn media_probe_call_timeout(ffprobe_seconds: u64, ffmpeg_seconds: u64) -> Duration {
+    let configured = std::env::var(MEDIA_PROBE_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|seconds| seconds.clamp(10, 3600));
+    media_probe_call_timeout_with(configured, ffprobe_seconds, ffmpeg_seconds)
+}
+
+fn media_probe_call_timeout_with(
+    configured: Option<u64>,
+    ffprobe_seconds: u64,
+    ffmpeg_seconds: u64,
+) -> Duration {
+    let floor = ffprobe_seconds
+        .saturating_mul(2)
+        .saturating_add(ffmpeg_seconds)
+        .saturating_add(MEDIA_PROBE_TIMEOUT_MARGIN_SECONDS);
+    Duration::from_secs(
+        configured
+            .unwrap_or(MEDIA_PROBE_CALL_TIMEOUT.as_secs())
+            .max(floor),
+    )
+}
 
 #[derive(Clone)]
 pub struct PluginSupervisor {
@@ -1051,5 +1080,39 @@ mod tests {
                     .path()
                     .join("plugin-config/org.lux.login-background-test.json")
         ));
+    }
+}
+
+#[cfg(test)]
+mod media_probe_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn default_budget_covers_the_plugin_default_limits() {
+        // 2 x 30 + 60 + 15 = 135 > 120: the floor wins over the old fixed budget.
+        assert_eq!(
+            media_probe_call_timeout_with(None, 30, 60),
+            Duration::from_secs(135)
+        );
+    }
+
+    #[test]
+    fn the_budget_always_exceeds_the_configured_plugin_limits() {
+        assert_eq!(
+            media_probe_call_timeout_with(None, 90, 180),
+            Duration::from_secs(375)
+        );
+        assert_eq!(
+            media_probe_call_timeout_with(Some(60), 90, 180),
+            Duration::from_secs(375)
+        );
+    }
+
+    #[test]
+    fn an_explicit_larger_budget_is_respected() {
+        assert_eq!(
+            media_probe_call_timeout_with(Some(900), 30, 60),
+            Duration::from_secs(900)
+        );
     }
 }
