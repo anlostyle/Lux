@@ -160,6 +160,26 @@ pub fn has_multi_part_marker(input: &str) -> bool {
         .any(is_multi_part_marker)
 }
 
+/// Key shared by the parts of one multi-part file (`X-cd1.mkv`, `X-cd2.mkv`): the lower-cased file
+/// stem with the part marker removed. `None` when the file name carries no part marker.
+pub fn multi_part_group_key(file_name: &str) -> Option<String> {
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|value| value.to_str())?;
+    let normalized = normalize_separators(stem);
+    let words = normalized.split_whitespace().collect::<Vec<_>>();
+    if !words.iter().any(|word| is_multi_part_marker(word)) {
+        return None;
+    }
+    let key = words
+        .iter()
+        .filter(|word| !is_multi_part_marker(word))
+        .map(|word| word.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!key.is_empty()).then_some(key)
+}
+
 pub fn has_source_variant_marker(input: &str) -> bool {
     let Some(stem) = Path::new(input)
         .file_stem()
