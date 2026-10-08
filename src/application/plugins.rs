@@ -64,6 +64,11 @@ use crate::{
 };
 use tokio::sync::Notify;
 
+const MEDIA_INFO_DEFAULT_FFPROBE_TIMEOUT_SECONDS: i64 = 30;
+const MEDIA_INFO_DEFAULT_FFMPEG_TIMEOUT_SECONDS: i64 = 60;
+const MEDIA_INFO_MIN_TIMEOUT_SECONDS: i64 = 10;
+const MEDIA_INFO_MAX_FFPROBE_TIMEOUT_SECONDS: i64 = 600;
+const MEDIA_INFO_MAX_FFMPEG_TIMEOUT_SECONDS: i64 = 900;
 pub const MEDIA_INFO_PLUGIN_ID: &str = "org.lux.strm-media-info";
 pub const CHAPTER_DETECTOR_PLUGIN_ID: &str = "org.lux.intro-outro-detector";
 const THEINTRODB_CHAPTER_SOURCE_ID: &str = "org.lux.theintrodb-chapter-source";
@@ -1638,6 +1643,40 @@ impl PluginService {
         self.sync_chapter_detection_scheduled_tasks().await
     }
 
+    /// ffprobe / ffmpeg limits (seconds) from the plugin settings; the plugin defaults when the
+    /// settings are missing or invalid, so an old plugin version or a bad value never blocks probing.
+    async fn media_info_timeout_seconds(&self, plugin: &DiscoveredPlugin) -> (i64, i64) {
+        let defaults = (
+            MEDIA_INFO_DEFAULT_FFPROBE_TIMEOUT_SECONDS,
+            MEDIA_INFO_DEFAULT_FFMPEG_TIMEOUT_SECONDS,
+        );
+        let Ok(fields) = self.config_fields_for_plugin(plugin).await else {
+            return defaults;
+        };
+        let Ok(stored) = self.read_plugin_config(MEDIA_INFO_PLUGIN_ID).await else {
+            return defaults;
+        };
+        let values = merge_default_config_values(&fields, stored);
+        (
+            optional_i64_config(
+                &values,
+                "ffprobeTimeoutSeconds",
+                defaults.0,
+                MEDIA_INFO_MIN_TIMEOUT_SECONDS,
+                MEDIA_INFO_MAX_FFPROBE_TIMEOUT_SECONDS,
+            )
+            .unwrap_or(defaults.0),
+            optional_i64_config(
+                &values,
+                "ffmpegTimeoutSeconds",
+                defaults.1,
+                MEDIA_INFO_MIN_TIMEOUT_SECONDS,
+                MEDIA_INFO_MAX_FFMPEG_TIMEOUT_SECONDS,
+            )
+            .unwrap_or(defaults.1),
+        )
+    }
+
     pub async fn media_info_settings(&self) -> Result<MediaInfoSettings, PluginServiceError> {
         let catalog = self.catalog_snapshot().await;
         let plugin = catalog
@@ -2169,6 +2208,7 @@ impl PluginService {
                 MEDIA_INFO_PLUGIN_ID.to_owned(),
             ));
         }
+        let (ffprobe_timeout, ffmpeg_timeout) = self.media_info_timeout_seconds(plugin).await;
         let value = self
             .supervisor
             .call_isolated_with_timeout(
@@ -2179,8 +2219,13 @@ impl PluginService {
                     "includeMediaInfo": include_media_info,
                     "includeThumbnail": include_thumbnail,
                     "thumbnailPositionPercent": thumbnail_position_percent,
+                    "ffprobeTimeoutSeconds": ffprobe_timeout,
+                    "ffmpegTimeoutSeconds": ffmpeg_timeout,
                 }),
-                crate::application::plugin_runtime::MEDIA_PROBE_CALL_TIMEOUT,
+                crate::application::plugin_runtime::media_probe_call_timeout(
+                    ffprobe_timeout.unsigned_abs(),
+                    ffmpeg_timeout.unsigned_abs(),
+                ),
             )
             .await
             .map_err(PluginServiceError::Runtime)?;
