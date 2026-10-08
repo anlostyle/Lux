@@ -2,6 +2,7 @@ import { LoaderCircle, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { MediaItem, MediaSource } from "../../lib/api/types";
 import { mediaTitle } from "../home/media";
+import { describeMediaSources } from "./mediaSourceLabels";
 import "./MediaDeleteDialog.css";
 
 /** What the user asked to delete: one version (source) or every version of the item. */
@@ -27,21 +28,9 @@ type MediaDeleteDialogProps = {
   onDeleted?: (result: MediaDeleteResult) => void;
 };
 
-export function mediaSourceLabel(source: MediaSource, index: number): string {
-  const name = source.editionName?.trim() || source.qualityLabel?.trim() || `版本 ${index + 1}`;
-  const details = [
-    source.editionName?.trim() && source.qualityLabel?.trim() ? source.qualityLabel.trim() : undefined,
-    source.container?.trim() && source.container.trim().toLowerCase() !== "strm" ? source.container.trim().toUpperCase() : undefined,
-    source.size ? formatSourceSize(source.size) : undefined,
-    source.durationTicks ? `${Math.max(1, Math.round(source.durationTicks / 600_000_000))} 分钟` : undefined,
-  ].filter(Boolean);
-  return details.length ? `${name}（${details.join(" · ")}）` : name;
-}
-
-function formatSourceSize(bytes: number): string {
-  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
-  if (bytes >= 1024 ** 2) return `${Math.round(bytes / 1024 ** 2)} MB`;
-  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+export function mediaSourceLabel(source: MediaSource, index: number, all: MediaSource[] = [source]): string {
+  const description = describeMediaSources(all)[index] ?? describeMediaSources([source])[0];
+  return description.detail ? `${description.label}（${description.detail}）` : description.label;
 }
 
 export function MediaDeleteDialog({ item, targetSourceId, sources: sourcesOverride, onClose, onConfirm, onDeleted }: MediaDeleteDialogProps) {
@@ -53,7 +42,7 @@ export function MediaDeleteDialog({ item, targetSourceId, sources: sourcesOverri
   const hasVersions = !isSeries && sources.length >= 2;
   const targetIndex = Math.max(0, sources.findIndex((source) => source.id === targetSourceId));
   const target = sources[targetIndex] as MediaSource | undefined;
-  const targetLabel = target ? mediaSourceLabel(target, targetIndex) : undefined;
+  const targetLabel = target ? mediaSourceLabel(target, targetIndex, sources) : undefined;
   const [scope, setScope] = useState<"source" | "all">("source");
 
   useEffect(() => {
