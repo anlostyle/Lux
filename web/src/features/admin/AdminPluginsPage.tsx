@@ -3,7 +3,7 @@ import { CheckCircle2, Download, Globe2, PackageOpen, RefreshCw, Save, Settings2
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../lib/api/client";
 import { queryKeys } from "../../lib/api/query-keys";
-import type { AdminPlugin } from "../../lib/api/types";
+import type { AdminPlugin, AdminPluginConfigField } from "../../lib/api/types";
 import { LuxSelect } from "../../components/LuxSelect";
 import { EmbyMigrationPluginConfig } from "./EmbyMigrationPluginConfig";
 import "./plugin-library.css";
@@ -15,6 +15,15 @@ const CONFIG_SELECT_FIELDS_RENDERED_EXPLICITLY = new Set([
   "fallbackLanguages",
   "libraryIds",
   "preferredLanguage",
+]);
+// Number fields with their own dedicated control; every other number field falls back to the
+// generic input so settings added to a manifest later show up without a frontend change.
+const CONFIG_NUMBER_FIELDS_RENDERED_EXPLICITLY = new Set([
+  "concurrency",
+  "creditsWindowSeconds",
+  "introWindowSeconds",
+  "matchThreshold",
+  "thumbnailPositionPercent",
 ]);
 const LOGIN_BACKGROUND_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const MAX_PLUGIN_IMAGE_UPLOAD_BYTES = 5 * 1024 * 1024;
@@ -151,6 +160,7 @@ function PluginCard({ plugin, installing, installedManagement, toggling, uninsta
   const [apiKeyDirty, setApiKeyDirty] = useState(false);
   const [additionalSelectValues, setAdditionalSelectValues] = useState<Record<string, string | string[]>>({});
   const [additionalToggleValues, setAdditionalToggleValues] = useState<Record<string, boolean>>({});
+  const [additionalNumberValues, setAdditionalNumberValues] = useState<Record<string, string>>({});
   const [uploadedImageFields, setUploadedImageFields] = useState<Record<string, boolean>>({});
   const [imageUploadErrors, setImageUploadErrors] = useState<Record<string, string>>({});
   const [danmakuProviderBaseUrl, setDanmakuProviderBaseUrl] = useState("");
@@ -213,6 +223,22 @@ function PluginCard({ plugin, installing, installedManagement, toggling, uninsta
   const additionalSelectFields = plugin.configFields.filter((field) =>
     field.type === "select" && !CONFIG_SELECT_FIELDS_RENDERED_EXPLICITLY.has(field.key));
   const additionalToggleFields = plugin.configFields.filter((field) => field.type === "toggle");
+  const additionalNumberFields = plugin.configFields.filter((field) =>
+    field.type === "number" && !CONFIG_NUMBER_FIELDS_RENDERED_EXPLICITLY.has(field.key));
+  const additionalNumberValid = (field: AdminPluginConfigField, raw: string | undefined) => {
+    if (raw === undefined || raw.trim() === "") return !field.required;
+    const value = Number(raw);
+    return Number.isInteger(value)
+      && (field.minimum == null || value >= field.minimum)
+      && (field.maximum == null || value <= field.maximum);
+  };
+  const additionalNumberInvalid = additionalNumberFields.some((field) =>
+    !additionalNumberValid(field, additionalNumberValues[field.key]));
+  const additionalNumberConfig = additionalNumberFields.reduce<Record<string, number>>((config, field) => {
+    const raw = additionalNumberValues[field.key];
+    if (raw !== undefined && raw.trim() !== "" && additionalNumberValid(field, raw)) config[field.key] = Number(raw);
+    return config;
+  }, {});
   const imageFields = plugin.configFields.filter((field) => field.type === "image");
   const additionalSelectConfig = additionalSelectFields.reduce<Record<string, string | string[]>>((config, field) => {
     const value = additionalSelectValues[field.key];
@@ -257,6 +283,7 @@ function PluginCard({ plugin, installing, installedManagement, toggling, uninsta
           writeSidecars,
           ...(scheduleField ? { schedule: schedule.trim() } : {}),
           ...additionalSelectConfig,
+          ...additionalNumberConfig,
           })
         : isChapterSource
           ? api.updateAdminPluginConfig(plugin.id, {
@@ -423,6 +450,12 @@ function PluginCard({ plugin, installing, installedManagement, toggling, uninsta
         ? configuredValue
         : field.defaultValue === true];
     })));
+    setAdditionalNumberValues(Object.fromEntries(additionalNumberFields.map((field) => {
+      const configuredValue = values[field.key];
+      return [field.key, typeof configuredValue === "number"
+        ? String(configuredValue)
+        : typeof field.defaultValue === "number" ? String(field.defaultValue) : ""];
+    })));
     setApiKey("");
     setApiKeyDirty(false);
     setDanmakuProviderBaseUrl("");
@@ -466,7 +499,7 @@ function PluginCard({ plugin, installing, installedManagement, toggling, uninsta
               <div><h2 id={`plugin-config-title-${plugin.id}`}>{plugin.name}</h2></div>
               <button ref={closeRef} className="lux-icon-button lux-admin-plugin-dialog-close" type="button" aria-label={`关闭 ${plugin.name}配置`} onClick={closeDialog}><X size={17} /></button>
             </div>
-            {isMigration ? <EmbyMigrationPluginConfig plugin={plugin} /> : <form className="lux-admin-plugin-dialog-form" autoComplete="off" onSubmit={(event) => { event.preventDefault(); if (!requiredSelectMissing) save.mutate(); }}>
+            {isMigration ? <EmbyMigrationPluginConfig plugin={plugin} /> : <form className="lux-admin-plugin-dialog-form" autoComplete="off" onSubmit={(event) => { event.preventDefault(); if (!requiredSelectMissing && !additionalNumberInvalid) save.mutate(); }}>
               {isDanmaku ? <>
                 {danmakuProviderField ? <label htmlFor={"plugin-config-" + plugin.id + "-provider-base-url"}>{danmakuProviderField.label}<input id={"plugin-config-" + plugin.id + "-provider-base-url"} type="url" value={danmakuProviderBaseUrl} onChange={(event) => { setDanmakuProviderBaseUrl(event.target.value); setDanmakuProviderBaseUrlDirty(true); }} placeholder="留空保留已保存的地址" autoComplete="url" required={danmakuProviderField.required && !plugin.configured} /><small>{danmakuProviderField.description}</small></label> : null}
                 {libraryIdsField ? <label htmlFor={"plugin-config-" + plugin.id + "-library-ids"}>{libraryIdsField.label}<LuxSelect id={"plugin-config-" + plugin.id + "-library-ids"} multiple value={libraryIds} options={libraryIdsField.options ?? []} onChange={setLibraryIds} aria-label={libraryIdsField.label} /><small>{libraryIdsField.description}</small></label> : null}
@@ -485,6 +518,7 @@ function PluginCard({ plugin, installing, installedManagement, toggling, uninsta
                 {mediaInfoEnabledField ? <label className="lux-admin-plugin-toggle"><input type="checkbox" checked={mediaInfoEnabled} onChange={(event) => setMediaInfoEnabled(event.target.checked)} /> <span><strong>{mediaInfoEnabledField.label}</strong><small>{mediaInfoEnabledField.description}</small></span></label> : null}
                 {thumbnailEnabledField ? <label className="lux-admin-plugin-toggle"><input type="checkbox" checked={thumbnailEnabled} onChange={(event) => setThumbnailEnabled(event.target.checked)} /> <span><strong>{thumbnailEnabledField.label}</strong><small>{thumbnailEnabledField.description}</small></span></label> : null}
                 {thumbnailPositionPercentField ? <label htmlFor={"plugin-config-" + plugin.id + "-thumbnail-position-percent"}>{thumbnailPositionPercentField.label}<input id={"plugin-config-" + plugin.id + "-thumbnail-position-percent"} type="number" required={thumbnailPositionPercentField.required} min={thumbnailPositionPercentField.minimum ?? 1} max={thumbnailPositionPercentField.maximum ?? 99} value={thumbnailPositionPercent} onChange={(event) => setThumbnailPositionPercent(Number(event.target.value))} /><small>{thumbnailPositionPercentField.description}</small></label> : null}
+                {additionalNumberFields.map((field) => <label key={field.key} htmlFor={"plugin-config-" + plugin.id + "-" + field.key}>{field.label}<input id={"plugin-config-" + plugin.id + "-" + field.key} name={field.key} type="number" step={1} min={field.minimum ?? undefined} max={field.maximum ?? undefined} required={field.required} aria-invalid={!additionalNumberValid(field, additionalNumberValues[field.key])} value={additionalNumberValues[field.key] ?? ""} onChange={(event) => setAdditionalNumberValues((current) => ({ ...current, [field.key]: event.target.value }))} />{field.description ? <small>{field.description}</small> : null}</label>)}
                 {writeSidecarsField ? <label className="lux-admin-plugin-toggle"><input type="checkbox" checked={writeSidecars} onChange={(event) => setWriteSidecars(event.target.checked)} /> <span><strong>{writeSidecarsField.label}</strong><small>{writeSidecarsField.description}</small></span></label> : null}
                 {scheduleField ? <label htmlFor={"plugin-config-" + plugin.id + "-schedule"}>{scheduleField.label}<input id={"plugin-config-" + plugin.id + "-schedule"} type="text" required={scheduleField.required} value={schedule} onChange={(event) => setSchedule(event.target.value)} placeholder="0 3 * * *" /><small>{scheduleField.description}</small></label> : null}
               </> : isChapterSource ? <>
@@ -580,7 +614,7 @@ function PluginCard({ plugin, installing, installedManagement, toggling, uninsta
               <p>{isLoginBackgroundProvider ? "展示来源与许可确认需要保存配置；自定义图片上传后会立即替换托管图片。" : `${danmakuProviderField?.description ?? configField?.description ?? "插件配置"} 当前：${availabilityLabel(plugin.configSource)}。`}</p>
               <div className="lux-admin-plugin-dialog-actions">
                 <button className="lux-button lux-button-secondary" type="button" onClick={closeDialog}>取消</button>
-                <button className="lux-button lux-button-primary" type="submit" disabled={save.isPending || uploadImage.isPending || requiredSelectMissing}><Save size={15} /> {save.isPending ? "保存中…" : "保存配置"}</button>
+                <button className="lux-button lux-button-primary" type="submit" disabled={save.isPending || uploadImage.isPending || requiredSelectMissing || additionalNumberInvalid}><Save size={15} /> {save.isPending ? "保存中…" : "保存配置"}</button>
               </div>
               {save.error ? <span className="lux-error-copy" role="alert">{save.error.message}</span> : null}
             </form>}
