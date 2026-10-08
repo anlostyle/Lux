@@ -93,7 +93,7 @@ describe("MediaDeleteDialog", () => {
     await click('[data-action="delete-confirm"]');
     expect(onConfirm).toHaveBeenCalledWith({ mode: "source", sourceId: "source-2" });
     expect(onDeleted).toHaveBeenCalledWith({
-      mode: "source", sourceId: "source-2", versionLabel: "cd2（1.1 GB）", remaining: 1,
+      mode: "source", sourceId: "source-2", versionLabel: "cd2（1.1 GB · strm）", remaining: 1,
     });
   });
 
