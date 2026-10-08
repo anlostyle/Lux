@@ -11814,6 +11814,32 @@ async fn postgres_merges_split_movie_items_into_one_with_all_sources()
     Ok(())
 }
 
+#[test]
+fn storage_error_log_codes_name_the_failure_without_leaking_details() {
+    use std::path::PathBuf;
+    let decode = StorageError::Sqlx {
+        path: PathBuf::from("/secret/path.db"),
+        source: sqlx::Error::ColumnDecode {
+            index: "0".to_owned(),
+            source: "mismatched types".into(),
+        },
+    };
+    assert_eq!(decode.log_code(), "SQL_DECODE");
+    let pool = StorageError::Sqlx {
+        path: PathBuf::from("x"),
+        source: sqlx::Error::PoolTimedOut,
+    };
+    assert_eq!(pool.log_code(), "SQL_POOL");
+    assert_eq!(
+        StorageError::Conflict("同名".to_owned()).log_code(),
+        "CONFLICT"
+    );
+    assert_eq!(StorageError::LastManager.log_code(), "LAST_MANAGER");
+    for error in [&decode, &pool] {
+        assert!(!error.log_code().contains("secret"));
+    }
+}
+
 fn part_file(index: i64, relative_path: &str, sort_title: &str) -> NewMovieFile {
     NewMovieFile {
         filesystem_entry_id: format!("part-entry-{index}"),
