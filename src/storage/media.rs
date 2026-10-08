@@ -1284,6 +1284,59 @@ impl Database {
         Ok(parent_folder_id)
     }
 
+    /// Finds the item that already owns a sibling part of the same multi-part file.
+    ///
+    /// Items are normally matched by the file-name derived `(sort_title, year)`, but NFO
+    /// enrichment rewrites an item's sort title, so a later part (cd2 arriving after cd1 was
+    /// enriched) no longer matches. This looks, inside the same parent folder and library, for a
+    /// live movie whose source file is another part of the same file: same name once the part
+    /// marker is removed, and carrying a part marker itself. It never matches across folders and
+    /// never matches files without a part marker.
+    async fn find_sibling_part_item_in_transaction(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, Any>,
+        library_id: &str,
+        parent_folder_id: &str,
+        group_key: &str,
+    ) -> Result<Option<PrefetchedMovieItem>, StorageError> {
+        let rows = self
+            .query(
+                "SELECT target.id, target.parent_id, target.provider_ids_json, target.removed_at,
+                        entry.relative_path
+                 FROM media_items target
+                 JOIN media_sources source ON source.item_id = target.id
+                 JOIN filesystem_entries entry ON entry.id = source.filesystem_entry_id
+                 WHERE target.parent_id = ? AND target.library_id = ?
+                   AND target.item_type = 'MOVIE' AND target.removed_at IS NULL
+                   AND entry.is_missing = 0
+                 ORDER BY target.id",
+            )
+            .bind(parent_folder_id)
+            .bind(library_id)
+            .fetch_all(&mut **transaction)
+            .await
+            .map_err(|source| StorageError::Sqlx {
+                path: self.path.clone(),
+                source,
+            })?;
+        for row in rows {
+            let relative_path = row.get::<String, _>("relative_path");
+            let file_name = relative_path.rsplit('/').next().unwrap_or(&relative_path);
+            if crate::application::media_matching::multi_part_group_key(file_name).as_deref()
+                != Some(group_key)
+            {
+                continue;
+            }
+            return Ok(Some(PrefetchedMovieItem {
+                id: row.get("id"),
+                parent_id: row.get("parent_id"),
+                provider_ids_json: row.get("provider_ids_json"),
+                removed_at: row.get("removed_at"),
+            }));
+        }
+        Ok(None)
+    }
+
     async fn prefetch_movie_items_in_transaction(
         &self,
         transaction: &mut sqlx::Transaction<'_, Any>,
@@ -2050,7 +2103,7 @@ impl Database {
             files.len(),
             0,
         );
-        let existing_movie_items = movie_cache
+        let mut existing_movie_items = movie_cache
             .values()
             .cloned()
             .map(|item| (item.id.clone(), item))
@@ -2094,6 +2147,8 @@ impl Database {
             }
         }
 
+        let mut sibling_part_cache: HashMap<(String, String), Option<PrefetchedMovieItem>> =
+            HashMap::new();
         let mut new_items = Vec::new();
         let mut new_item_ids = HashSet::new();
         let mut parent_updates = HashMap::new();
@@ -2106,6 +2161,41 @@ impl Database {
                 &folder_cache,
             )?;
             let identity = (file.sort_title.clone(), file.production_year);
+            if !movie_cache.contains_key(&identity)
+                && let Some(parent_folder_id) = parent_folder_id.as_deref()
+                && let Some(group_key) = crate::application::media_matching::multi_part_group_key(
+                    file.relative_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&file.relative_path),
+                )
+            {
+                let sibling = match sibling_part_cache
+                    .get(&(parent_folder_id.to_owned(), group_key.clone()))
+                {
+                    Some(cached) => cached.clone(),
+                    None => {
+                        let found = self
+                            .find_sibling_part_item_in_transaction(
+                                &mut *transaction,
+                                library_id,
+                                parent_folder_id,
+                                &group_key,
+                            )
+                            .await?;
+                        sibling_part_cache
+                            .insert((parent_folder_id.to_owned(), group_key), found.clone());
+                        found
+                    }
+                };
+                if let Some(item) = sibling {
+                    existing_movie_items.insert(item.id.clone(), item.clone());
+                    provider_baselines
+                        .entry(item.id.clone())
+                        .or_insert_with(|| item.provider_ids_json.clone());
+                    movie_cache.insert(identity.clone(), item);
+                }
+            }
             let (item_id, is_new_item) = if let Some(item) = movie_cache.get(&identity) {
                 (item.id.clone(), false)
             } else {
