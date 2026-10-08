@@ -11717,6 +11717,185 @@ async fn movie_batch_insert_updates_strm_poster_fallbacks_as_a_set() {
     assert_eq!(fallback_count, 2);
 }
 
+fn part_file(index: i64, relative_path: &str, sort_title: &str) -> NewMovieFile {
+    NewMovieFile {
+        filesystem_entry_id: format!("part-entry-{index}"),
+        source_id: format!("part-source-{index}"),
+        relative_path: relative_path.to_owned(),
+        size: 1,
+        modified_at: index,
+        fingerprint: vec![index as u8],
+        title: sort_title.to_owned(),
+        sort_title: sort_title.to_owned(),
+        original_title: sort_title.to_owned(),
+        production_year: Some(2026),
+        provider_ids_json: None,
+        source_kind: "STRM_URL".to_owned(),
+        strm_target_kind: Some("PATH".to_owned()),
+        edition_name: None,
+        quality_label: None,
+        container: "strm".to_owned(),
+        external_url: Some(format!("/CloudNAS/CloudDrive/part-{index}.mp4")),
+    }
+}
+
+async fn part_fixture() -> (tempfile::TempDir, Database, String, String) {
+    let temp_dir = tempfile::tempdir().expect("temporary directory");
+    let config = Config {
+        http_addr: "127.0.0.1:8097".parse().expect("test address"),
+        config_dir: temp_dir.path().join("config"),
+    };
+    let database = Database::connect(&config).await.expect("database");
+    let libraries = LibraryService::new(database.clone());
+    let library = libraries
+        .create_library("Movies", LibraryKind::Movie, false)
+        .await
+        .expect("library");
+    let root_path = temp_dir.path().join("media");
+    tokio::fs::create_dir_all(&root_path)
+        .await
+        .expect("media root");
+    let root = libraries
+        .add_root(library.id, root_path.to_str().expect("utf-8 media root"))
+        .await
+        .expect("library root")
+        .root;
+    (
+        temp_dir,
+        database,
+        library.id.to_string(),
+        root.id.to_string(),
+    )
+}
+
+async fn movie_item_source_counts(database: &Database) -> Vec<i64> {
+    let mut counts: Vec<i64> = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM media_sources s WHERE s.item_id = i.id)
+         FROM media_items i WHERE i.item_type = 'MOVIE' AND i.removed_at IS NULL",
+    )
+    .fetch_all(database.pool())
+    .await
+    .expect("source counts");
+    counts.sort_unstable();
+    counts
+}
+
+#[tokio::test]
+async fn later_parts_join_the_item_whose_sort_title_was_rewritten_by_nfo_enrichment() {
+    for same_batch in [false, true] {
+        let (_temp, database, library_id, root_id) = part_fixture().await;
+        database
+            .insert_movie_files_batch(
+                &library_id,
+                &root_id,
+                "g1",
+                &[part_file(1, "2026/FC2-1/FC2-1-无码-cd1.strm", "fc2-1 无码")],
+            )
+            .await
+            .expect("cd1");
+        // NFO enrichment replaces the file-name derived sort title.
+        sqlx::query(
+            "UPDATE media_items SET sort_title = 'fc2-1 long nfo title' WHERE item_type = 'MOVIE'",
+        )
+        .execute(database.pool())
+        .await
+        .expect("enrich");
+        let later = [
+            part_file(2, "2026/FC2-1/FC2-1-无码-cd2.strm", "fc2-1 无码"),
+            part_file(3, "2026/FC2-1/FC2-1-无码-cd3.strm", "fc2-1 无码"),
+        ];
+        if same_batch {
+            database
+                .insert_movie_files_batch(&library_id, &root_id, "g2", &later)
+                .await
+                .expect("cd2+cd3");
+        } else {
+            for (round, file) in later.iter().enumerate() {
+                database
+                    .insert_movie_files_batch(
+                        &library_id,
+                        &root_id,
+                        &format!("g{}", round + 2),
+                        std::slice::from_ref(file),
+                    )
+                    .await
+                    .expect("later part");
+            }
+        }
+        assert_eq!(
+            movie_item_source_counts(&database).await,
+            vec![3],
+            "same_batch={same_batch}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn part_fallback_does_not_merge_other_films_other_folders_or_unmarked_files() {
+    let (_temp, database, library_id, root_id) = part_fixture().await;
+    database
+        .insert_movie_files_batch(
+            &library_id,
+            &root_id,
+            "g1",
+            &[part_file(1, "2026/FC2-1/FC2-1-无码-cd1.strm", "fc2-1 无码")],
+        )
+        .await
+        .expect("cd1");
+    sqlx::query(
+        "UPDATE media_items SET sort_title = 'fc2-1 long nfo title' WHERE item_type = 'MOVIE'",
+    )
+    .execute(database.pool())
+    .await
+    .expect("enrich");
+    database
+        .insert_movie_files_batch(
+            &library_id,
+            &root_id,
+            "g2",
+            &[
+                // a different film in the same folder (different name once the marker is removed)
+                part_file(2, "2026/FC2-1/FC2-2-无码-cd1.strm", "fc2-2 无码"),
+                // the same file name in another folder
+                part_file(3, "2026/FC2-9/FC2-1-无码-cd2.strm", "fc2-1 无码"),
+            ],
+        )
+        .await
+        .expect("others");
+    assert_eq!(movie_item_source_counts(&database).await, vec![1, 1, 1]);
+}
+
+#[tokio::test]
+async fn part_fallback_ignores_files_without_a_part_marker() {
+    let (_temp, database, library_id, root_id) = part_fixture().await;
+    database
+        .insert_movie_files_batch(
+            &library_id,
+            &root_id,
+            "g1",
+            &[part_file(1, "2026/FC2-1/FC2-1-无码-cd1.strm", "fc2-1 无码")],
+        )
+        .await
+        .expect("cd1");
+    sqlx::query(
+        "UPDATE media_items SET sort_title = 'fc2-1 long nfo title' WHERE item_type = 'MOVIE'",
+    )
+    .execute(database.pool())
+    .await
+    .expect("enrich");
+    // Same folder and stem but no part marker: behaves as before (its own item).
+    database
+        .insert_movie_files_batch(
+            &library_id,
+            &root_id,
+            "g2",
+            &[part_file(2, "2026/FC2-1/FC2-1-无码.strm", "fc2-1 无码")],
+        )
+        .await
+        .expect("unmarked");
+    assert_eq!(movie_item_source_counts(&database).await, vec![1, 1]);
+}
+
 #[tokio::test]
 async fn stale_strm_probe_failures_are_requeued_but_fresh_ones_are_not() {
     let temp_dir = tempfile::tempdir().expect("temporary directory");
