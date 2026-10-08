@@ -3693,6 +3693,29 @@ pub enum StorageError {
 }
 
 impl StorageError {
+    /// Stable, non-sensitive label for logs: which kind of storage failure this was, without the
+    /// SQL text, paths or values that the error message may contain.
+    pub(crate) fn log_code(&self) -> &'static str {
+        match self {
+            Self::Configuration(_) => "CONFIGURATION",
+            Self::Io { .. } => "IO",
+            Self::Migration { .. } => "MIGRATION",
+            Self::Conflict(_) => "CONFLICT",
+            Self::Serialization(_) => "SERIALIZATION",
+            Self::LastManager => "LAST_MANAGER",
+            Self::Sqlx { source, .. } => match source {
+                sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_) => "SQL_DECODE",
+                sqlx::Error::Database(error) if error.is_unique_violation() => {
+                    "SQL_UNIQUE_VIOLATION"
+                }
+                sqlx::Error::Database(_) => "SQL_DATABASE",
+                sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed => "SQL_POOL",
+                sqlx::Error::Io(_) | sqlx::Error::Tls(_) => "SQL_CONNECTION",
+                _ => "SQL",
+            },
+        }
+    }
+
     pub(crate) fn is_unique_violation(&self) -> bool {
         matches!(
             self,

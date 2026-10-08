@@ -6949,7 +6949,17 @@ pub(crate) async fn admin_merge_items(
             )
             .into_response();
         }
-        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Err(error) => {
+            // Without this the client only sees a 503 and the cause (for example a PostgreSQL
+            // decode error that never reaches the server log) is lost.
+            tracing::error!(
+                error_code = error.log_code(),
+                primary_item_id = %request.primary_item_id,
+                item_count = request.item_ids.len(),
+                "merging media items failed"
+            );
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
     };
     if let Some(home) = state.home.as_ref() {
         home.invalidate();
