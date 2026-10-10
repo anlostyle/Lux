@@ -18006,7 +18006,6 @@ fn storage_error_log_codes_name_the_failure_without_leaking_details() {
     }
 }
 
-
 async fn assert_removed_media_item_purge(
     database: &Database,
 ) -> Result<(), Box<dyn std::error::Error>> {
