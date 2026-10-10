@@ -44,12 +44,9 @@ pub(super) async fn emby_playback_info(
     };
     let mut sources = item.media_sources.iter().collect::<Vec<_>>();
     let query_media_source_requested = query.media_source_id.is_some();
-    sources.sort_by(|left, right| {
-        right
-            .is_default
-            .cmp(&left.is_default)
-            .then_with(|| left.id.cmp(&right.id))
-    });
+    // The catalog already ordered the versions for this user; only move the default
+    // source to the front and keep the rest of that order.
+    sources.sort_by_key(|source| !source.is_default);
     if let Some(source_id) = query.media_source_id {
         let Some(index) = sources.iter().position(|source| source.id == source_id) else {
             return StatusCode::NOT_FOUND.into_response();

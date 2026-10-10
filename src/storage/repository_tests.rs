@@ -1203,6 +1203,137 @@ async fn postgres_metadata_batch_writes_preserve_upsert_and_retry_semantics()
     Ok(())
 }
 
+async fn assert_version_priority_rules_round_trip(
+    database: &Database,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::application::version_priority::{VersionPriorityMode, VersionPriorityRule};
+    let library = LibraryService::new(database.clone())
+        .create_library("Rules", LibraryKind::Movie, false)
+        .await?;
+    let library_id = library.id.to_string();
+    database
+        .query(
+            "INSERT INTO users (id, username_normalized, display_name, password_hash)
+             VALUES ('rules-user', 'rules-user', 'Rules User', 'test')",
+        )
+        .execute(database.pool())
+        .await?;
+    let quality = VersionPriorityRule {
+        mode: VersionPriorityMode::Quality,
+        custom: None,
+    };
+    database
+        .set_library_version_priority(&library_id, Some(&quality))
+        .await?;
+    database
+        .set_library_version_priority(&library_id, Some(&quality))
+        .await?;
+    database
+        .set_user_version_priority("rules-user", "*", Some(&quality))
+        .await?;
+    database
+        .set_user_version_priority_permission("rules-user", false)
+        .await?;
+    database.reload_version_priority().await?;
+    let snapshot = database.version_priority_snapshot();
+    assert_eq!(snapshot.library_rules.get(&library_id), Some(&quality));
+    let user = snapshot.users.get("rules-user").ok_or("user rules")?;
+    assert!(!user.can_customize);
+    assert_eq!(user.rules.get("*"), Some(&quality));
+    database
+        .set_library_version_priority(&library_id, None)
+        .await?;
+    database
+        .set_user_version_priority("rules-user", "*", None)
+        .await?;
+    let snapshot = database.version_priority_snapshot();
+    assert!(snapshot.library_rules.is_empty());
+    assert!(
+        snapshot
+            .users
+            .get("rules-user")
+            .is_some_and(|user| user.rules.is_empty())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn version_priority_rules_round_trip() {
+    let temp_dir = tempfile::tempdir().expect("temporary directory");
+    let config = Config {
+        http_addr: "127.0.0.1:8097".parse().expect("test address"),
+        config_dir: temp_dir.path().join("config"),
+    };
+    let database = Database::connect(&config).await.expect("database");
+    assert_version_priority_rules_round_trip(&database)
+        .await
+        .expect("rule round trip");
+}
+
+#[tokio::test]
+#[ignore = "requires a local PostgreSQL instance"]
+async fn postgres_version_priority_rules_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let database_name = format!("lux_test_{}", uuid::Uuid::now_v7().simple());
+    let admin_connection = PostgresConnection {
+        host: std::env::var("POSTGRES_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+        port: std::env::var("POSTGRES_TEST_PORT")
+            .ok()
+            .and_then(|port| port.parse().ok())
+            .unwrap_or(55432),
+        database: "postgres".to_owned(),
+        username: std::env::var("POSTGRES_TEST_USER").unwrap_or_else(|_| "lux".to_owned()),
+        password: std::env::var("POSTGRES_TEST_PASSWORD")
+            .unwrap_or_else(|_| "lux-test-password".to_owned()),
+        ssl_mode: "disable".to_owned(),
+    };
+    let admin_configuration =
+        crate::config::DatabaseConfiguration::Postgres(admin_connection.clone());
+    let admin_url = admin_configuration
+        .postgres_url()?
+        .ok_or("missing PostgreSQL URL")?;
+    let admin_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE DATABASE {database_name}"
+    )))
+    .execute(&admin_pool)
+    .await?;
+    let temp_dir = tempfile::tempdir()?;
+    let config = Config {
+        http_addr: "127.0.0.1:8097".parse()?,
+        config_dir: temp_dir.path().join("config"),
+    };
+    let database = Database::connect_with_configuration(
+        &config,
+        &crate::config::DatabaseConfiguration::Postgres(PostgresConnection {
+            database: database_name.clone(),
+            ..admin_connection
+        }),
+    )
+    .await?;
+    let outcome = tokio::spawn({
+        let database = database.clone();
+        async move {
+            assert_version_priority_rules_round_trip(&database)
+                .await
+                .map_err(|error| error.to_string())
+        }
+    })
+    .await;
+    database.close().await;
+    let drop_database = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS {database_name}"
+    )))
+    .execute(&admin_pool)
+    .await;
+    admin_pool.close().await;
+    outcome??;
+    drop_database?;
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires a local PostgreSQL instance"]
 async fn postgres_scan_write_transaction_uses_local_async_commit()
@@ -9891,6 +10022,7 @@ async fn metadata_job_list_counts_only_pending_items_on_the_requested_page() {
         person_credits_write_lock: Arc::new(AsyncMutex::new(())),
         metadata_write_lock: Arc::new(AsyncMutex::new(())),
         recommendation_stats_refresh_lock: Arc::new(AsyncMutex::new(())),
+        version_priority: Default::default(),
         recommendation_rating_median_cache: Arc::new(AsyncMutex::new(
             RecommendationRatingMedianCache::default(),
         )),
@@ -12143,6 +12275,7 @@ async fn write_probe_reports_a_query_only_sqlite_connection() {
         person_credits_write_lock: Arc::new(AsyncMutex::new(())),
         metadata_write_lock: Arc::new(AsyncMutex::new(())),
         recommendation_stats_refresh_lock: Arc::new(AsyncMutex::new(())),
+        version_priority: Default::default(),
         recommendation_rating_median_cache: Arc::new(AsyncMutex::new(
             RecommendationRatingMedianCache::default(),
         )),
@@ -12209,6 +12342,7 @@ async fn metadata_jobs_process_series_before_seasons_and_episodes() {
         person_credits_write_lock: Arc::new(AsyncMutex::new(())),
         metadata_write_lock: Arc::new(AsyncMutex::new(())),
         recommendation_stats_refresh_lock: Arc::new(AsyncMutex::new(())),
+        version_priority: Default::default(),
         recommendation_rating_median_cache: Arc::new(AsyncMutex::new(
             RecommendationRatingMedianCache::default(),
         )),
@@ -12337,6 +12471,7 @@ async fn metadata_jobs_claim_items_in_priority_order_as_a_batch() {
         person_credits_write_lock: Arc::new(AsyncMutex::new(())),
         metadata_write_lock: Arc::new(AsyncMutex::new(())),
         recommendation_stats_refresh_lock: Arc::new(AsyncMutex::new(())),
+        version_priority: Default::default(),
         recommendation_rating_median_cache: Arc::new(AsyncMutex::new(
             RecommendationRatingMedianCache::default(),
         )),
@@ -12767,6 +12902,7 @@ async fn metadata_attempt_state_loads_both_attempt_tables_with_one_query() {
         person_credits_write_lock: Arc::new(AsyncMutex::new(())),
         metadata_write_lock: Arc::new(AsyncMutex::new(())),
         recommendation_stats_refresh_lock: Arc::new(AsyncMutex::new(())),
+        version_priority: Default::default(),
         recommendation_rating_median_cache: Arc::new(AsyncMutex::new(
             RecommendationRatingMedianCache::default(),
         )),
@@ -12855,6 +12991,7 @@ async fn item_media_strategy_settings_use_one_query_and_require_an_active_item()
         person_credits_write_lock: Arc::new(AsyncMutex::new(())),
         metadata_write_lock: Arc::new(AsyncMutex::new(())),
         recommendation_stats_refresh_lock: Arc::new(AsyncMutex::new(())),
+        version_priority: Default::default(),
         recommendation_rating_median_cache: Arc::new(AsyncMutex::new(
             RecommendationRatingMedianCache::default(),
         )),
@@ -13355,6 +13492,7 @@ async fn metadata_jobs_reconcile_items_left_running_by_workers() {
         person_credits_write_lock: Arc::new(AsyncMutex::new(())),
         metadata_write_lock: Arc::new(AsyncMutex::new(())),
         recommendation_stats_refresh_lock: Arc::new(AsyncMutex::new(())),
+        version_priority: Default::default(),
         recommendation_rating_median_cache: Arc::new(AsyncMutex::new(
             RecommendationRatingMedianCache::default(),
         )),
