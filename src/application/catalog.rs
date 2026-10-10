@@ -417,6 +417,343 @@ impl CatalogService {
         self.library_page_cache.invalidate();
     }
 
+    /// Stores the version the library rule picks (or, without a rule, the oldest version)
+    /// as the default source of every multi-version item in `library_id`. The stored
+    /// default serves requests without a user and code paths that read it directly.
+    pub async fn recompute_library_default_sources(
+        &self,
+        library_id: &str,
+    ) -> Result<u64, CatalogError> {
+        const PAGE_SIZE: i64 = 200;
+        let snapshot = self.database.version_priority_snapshot();
+        let rule = snapshot
+            .resolve(None, library_id)
+            .filter(|rule| rule.is_active())
+            .cloned();
+        let mut changed = 0_u64;
+        let mut after_id = String::new();
+        loop {
+            let item_ids = self
+                .database
+                .list_multi_source_item_ids(library_id, &after_id, PAGE_SIZE)
+                .await?;
+            let Some(last_id) = item_ids.last().cloned() else {
+                break;
+            };
+            let rows = self.database.list_catalog_rows_by_ids(&item_ids).await?;
+            for mut item in assemble_items(rows) {
+                let default_source_id = match rule.as_ref() {
+                    Some(rule) => {
+                        crate::application::version_priority::order_sources(
+                            &mut item.media_sources,
+                            rule,
+                        );
+                        item.media_sources.first().map(|source| source.id.clone())
+                    }
+                    // Sources arrive oldest first; the oldest version's first part wins.
+                    None => group_source_versions(item.media_sources)
+                        .into_iter()
+                        .next()
+                        .and_then(|group| group.into_iter().next())
+                        .map(|source| source.id),
+                };
+                if let Some(source_id) = default_source_id
+                    && self
+                        .database
+                        .set_default_media_source(&item.id, &source_id)
+                        .await?
+                {
+                    changed = changed.saturating_add(1);
+                }
+            }
+            after_id = last_id;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        Ok(changed)
+    }
+
+    /// The versions of `item_id` ordered by `rule`, or without one by the rule that
+    /// applies to `principal` (`library_only` ignores the principal's own rules).
+    pub async fn preview_version_order(
+        &self,
+        principal: AccessPrincipal,
+        item_id: &str,
+        rule: Option<&crate::application::version_priority::VersionPriorityRule>,
+        library_only: bool,
+    ) -> Result<Option<CatalogItem>, CatalogError> {
+        let Some(mut item) = self.find_item_unordered(principal, item_id).await? else {
+            return Ok(None);
+        };
+        let snapshot = self.database.version_priority_snapshot();
+        let user_id = principal.user_id.map(|id| id.to_string());
+        let viewer = if library_only {
+            None
+        } else {
+            user_id
+                .as_deref()
+                .map(|user_id| (user_id, principal.is_admin))
+        };
+        let rule = rule.or_else(|| snapshot.resolve(viewer, &item.library_id));
+        if let Some(rule) = rule {
+            crate::application::version_priority::order_sources(&mut item.media_sources, rule);
+        }
+        Ok(Some(item))
+    }
+
+    /// Orders every item's versions by the version priority that applies to `principal`.
+    fn order_versions(&self, principal: AccessPrincipal, items: &mut [CatalogItem]) {
+        let snapshot = self.database.version_priority_snapshot();
+        let user_id = principal.user_id.map(|id| id.to_string());
+        crate::application::version_priority::apply_version_priority(
+            &snapshot,
+            user_id
+                .as_deref()
+                .map(|user_id| (user_id, principal.is_admin)),
+            items,
+        );
+    }
+
+    pub async fn list_library_items(
+        &self,
+        principal: AccessPrincipal,
+        library_id: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<CatalogPage, CatalogError> {
+        let mut page = self
+            .list_library_items_unordered(principal, library_id, offset, limit)
+            .await?;
+        self.order_versions(principal, &mut page.items);
+        Ok(page)
+    }
+
+    pub async fn list_library_items_in_scope(
+        &self,
+        principal: AccessPrincipal,
+        library_id: &str,
+        filter: &CatalogFilter,
+        parent_scope: Option<CatalogParentScope>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<CatalogPage, CatalogError> {
+        let mut page = self
+            .list_library_items_in_scope_unordered(
+                principal,
+                library_id,
+                filter,
+                parent_scope,
+                offset,
+                limit,
+            )
+            .await?;
+        self.order_versions(principal, &mut page.items);
+        Ok(page)
+    }
+
+    pub async fn list_all_items_filtered(
+        &self,
+        principal: AccessPrincipal,
+        filter: &CatalogFilter,
+        offset: i64,
+        limit: i64,
+    ) -> Result<CatalogPage, CatalogError> {
+        let mut page = self
+            .list_all_items_filtered_unordered(principal, filter, offset, limit)
+            .await?;
+        self.order_versions(principal, &mut page.items);
+        Ok(page)
+    }
+
+    pub async fn list_children_with_sort(
+        &self,
+        principal: AccessPrincipal,
+        parent_id: &str,
+        item_types: &str,
+        sort: (CatalogSort, bool),
+        offset: i64,
+        limit: i64,
+    ) -> Result<CatalogPage, CatalogError> {
+        let mut page = self
+            .list_children_with_sort_unordered(
+                principal, parent_id, item_types, sort, offset, limit,
+            )
+            .await?;
+        self.order_versions(principal, &mut page.items);
+        Ok(page)
+    }
+
+    pub async fn list_children(
+        &self,
+        principal: AccessPrincipal,
+        parent_id: &str,
+        item_types: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<CatalogPage, CatalogError> {
+        let mut page = self
+            .list_children_unordered(principal, parent_id, item_types, offset, limit)
+            .await?;
+        self.order_versions(principal, &mut page.items);
+        Ok(page)
+    }
+
+    pub async fn list_series_episodes(
+        &self,
+        principal: AccessPrincipal,
+        series_id: &str,
+        season_id: Option<&str>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<CatalogPage, CatalogError> {
+        let mut page = self
+            .list_series_episodes_unordered(principal, series_id, season_id, offset, limit)
+            .await?;
+        self.order_versions(principal, &mut page.items);
+        Ok(page)
+    }
+
+    pub async fn list_collection_items(
+        &self,
+        principal: AccessPrincipal,
+        collection_item_id: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<CatalogPage, CatalogError> {
+        let mut page = self
+            .list_collection_items_unordered(principal, collection_item_id, offset, limit)
+            .await?;
+        self.order_versions(principal, &mut page.items);
+        Ok(page)
+    }
+
+    pub async fn list_next_up(
+        &self,
+        principal: AccessPrincipal,
+        user_id: &str,
+        series_id: Option<&str>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<CatalogPage, CatalogError> {
+        let mut page = self
+            .list_next_up_unordered(principal, user_id, series_id, offset, limit)
+            .await?;
+        self.order_versions(principal, &mut page.items);
+        Ok(page)
+    }
+
+    pub async fn list_continue_watching(
+        &self,
+        principal: AccessPrincipal,
+        user_id: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<CatalogPage, CatalogError> {
+        let mut page = self
+            .list_continue_watching_unordered(principal, user_id, offset, limit)
+            .await?;
+        self.order_versions(principal, &mut page.items);
+        Ok(page)
+    }
+
+    pub async fn list_recently_added(
+        &self,
+        principal: AccessPrincipal,
+        offset: i64,
+        limit: i64,
+    ) -> Result<CatalogPage, CatalogError> {
+        let mut page = self
+            .list_recently_added_unordered(principal, offset, limit)
+            .await?;
+        self.order_versions(principal, &mut page.items);
+        Ok(page)
+    }
+
+    pub async fn list_recently_added_by_library(
+        &self,
+        principal: AccessPrincipal,
+        limit: i64,
+    ) -> Result<Vec<(String, Vec<CatalogItem>)>, CatalogError> {
+        let mut groups = self
+            .list_recently_added_by_library_unordered(principal, limit)
+            .await?;
+        for (_, items) in &mut groups {
+            self.order_versions(principal, items);
+        }
+        Ok(groups)
+    }
+
+    pub async fn list_recommended(
+        &self,
+        principal: AccessPrincipal,
+        user_id: &str,
+        limit: i64,
+    ) -> Result<Vec<CatalogItem>, CatalogError> {
+        let mut items = self
+            .list_recommended_unordered(principal, user_id, limit)
+            .await?;
+        self.order_versions(principal, &mut items);
+        Ok(items)
+    }
+
+    pub async fn find_item(
+        &self,
+        principal: AccessPrincipal,
+        item_id: &str,
+    ) -> Result<Option<CatalogItem>, CatalogError> {
+        let mut item = self.find_item_unordered(principal, item_id).await?;
+        if let Some(item) = item.as_mut() {
+            self.order_versions(principal, std::slice::from_mut(item));
+        }
+        Ok(item)
+    }
+
+    pub async fn find_item_by_media_source_id(
+        &self,
+        principal: AccessPrincipal,
+        media_source_id: &str,
+    ) -> Result<Option<CatalogItem>, CatalogError> {
+        let mut item = self
+            .find_item_by_media_source_id_unordered(principal, media_source_id)
+            .await?;
+        if let Some(item) = item.as_mut() {
+            self.order_versions(principal, std::slice::from_mut(item));
+        }
+        Ok(item)
+    }
+
+    pub async fn search_items(
+        &self,
+        principal: AccessPrincipal,
+        query: &str,
+        like_query: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<CatalogPage, CatalogError> {
+        let mut page = self
+            .search_items_unordered(principal, query, like_query, offset, limit)
+            .await?;
+        self.order_versions(principal, &mut page.items);
+        Ok(page)
+    }
+
+    pub async fn search_items_with_types(
+        &self,
+        principal: AccessPrincipal,
+        query: &str,
+        like_query: &str,
+        item_types: Vec<String>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<CatalogPage, CatalogError> {
+        let mut page = self
+            .search_items_with_types_unordered(
+                principal, query, like_query, item_types, offset, limit,
+            )
+            .await?;
+        self.order_versions(principal, &mut page.items);
+        Ok(page)
+    }
+
     pub async fn count_item_types(
         &self,
         principal: AccessPrincipal,
@@ -473,7 +810,7 @@ impl CatalogService {
             .await?)
     }
 
-    pub async fn list_library_items(
+    async fn list_library_items_unordered(
         &self,
         principal: AccessPrincipal,
         library_id: &str,
@@ -516,7 +853,7 @@ impl CatalogService {
             .await
     }
 
-    pub async fn list_library_items_in_scope(
+    async fn list_library_items_in_scope_unordered(
         &self,
         principal: AccessPrincipal,
         library_id: &str,
@@ -594,7 +931,7 @@ impl CatalogService {
         })
     }
 
-    pub async fn list_all_items_filtered(
+    async fn list_all_items_filtered_unordered(
         &self,
         principal: AccessPrincipal,
         filter: &CatalogFilter,
@@ -642,7 +979,7 @@ impl CatalogService {
         })
     }
 
-    pub async fn list_children(
+    async fn list_children_unordered(
         &self,
         principal: AccessPrincipal,
         parent_id: &str,
@@ -654,7 +991,7 @@ impl CatalogService {
             .await
     }
 
-    pub async fn list_children_with_sort(
+    async fn list_children_with_sort_unordered(
         &self,
         principal: AccessPrincipal,
         parent_id: &str,
@@ -713,7 +1050,7 @@ impl CatalogService {
         })
     }
 
-    pub async fn list_series_episodes(
+    async fn list_series_episodes_unordered(
         &self,
         principal: AccessPrincipal,
         series_id: &str,
@@ -784,7 +1121,7 @@ impl CatalogService {
         })
     }
 
-    pub async fn list_collection_items(
+    async fn list_collection_items_unordered(
         &self,
         principal: AccessPrincipal,
         collection_item_id: &str,
@@ -838,7 +1175,7 @@ impl CatalogService {
         })
     }
 
-    pub async fn list_next_up(
+    async fn list_next_up_unordered(
         &self,
         principal: AccessPrincipal,
         user_id: &str,
@@ -850,7 +1187,7 @@ impl CatalogService {
             .await
     }
 
-    pub async fn list_continue_watching(
+    async fn list_continue_watching_unordered(
         &self,
         principal: AccessPrincipal,
         user_id: &str,
@@ -957,7 +1294,7 @@ impl CatalogService {
         })
     }
 
-    pub async fn list_recently_added(
+    async fn list_recently_added_unordered(
         &self,
         principal: AccessPrincipal,
         offset: i64,
@@ -1016,7 +1353,7 @@ impl CatalogService {
         })
     }
 
-    pub async fn list_recently_added_by_library(
+    async fn list_recently_added_by_library_unordered(
         &self,
         principal: AccessPrincipal,
         limit: i64,
@@ -1047,7 +1384,7 @@ impl CatalogService {
         Ok(grouped.into_iter().collect())
     }
 
-    pub async fn list_recommended(
+    async fn list_recommended_unordered(
         &self,
         principal: AccessPrincipal,
         user_id: &str,
@@ -1226,7 +1563,7 @@ impl CatalogService {
         Ok(())
     }
 
-    pub async fn find_item(
+    async fn find_item_unordered(
         &self,
         principal: AccessPrincipal,
         item_id: &str,
@@ -1329,7 +1666,7 @@ impl CatalogService {
             .collect())
     }
 
-    pub async fn find_item_by_media_source_id(
+    async fn find_item_by_media_source_id_unordered(
         &self,
         principal: AccessPrincipal,
         media_source_id: &str,
@@ -1445,7 +1782,7 @@ impl CatalogService {
         Ok(())
     }
 
-    pub async fn search_items(
+    async fn search_items_unordered(
         &self,
         principal: AccessPrincipal,
         query: &str,
@@ -1461,7 +1798,7 @@ impl CatalogService {
             .await
     }
 
-    pub async fn search_items_with_types(
+    async fn search_items_with_types_unordered(
         &self,
         principal: AccessPrincipal,
         query: &str,
@@ -1783,43 +2120,49 @@ pub fn belongs_to_default_version(sources: &[CatalogSource], source: &CatalogSou
         && default.version_key() == source.version_key()
 }
 
+/// Groups sources into versions: the parts of one multi-part version (same version key,
+/// each with a part number) form one group in part order; every other source is its own
+/// group. Groups keep the order in which their first source appeared.
+pub(crate) fn group_source_versions(sources: Vec<CatalogSource>) -> Vec<Vec<CatalogSource>> {
+    let mut groups: Vec<(String, Vec<CatalogSource>)> = Vec::new();
+    for source in sources {
+        let key = source.version_key();
+        let is_part = source.part_index().is_some();
+        match groups.iter_mut().find(|(group_key, members)| {
+            is_part
+                && *group_key == key
+                && members.iter().any(|member| member.part_index().is_some())
+        }) {
+            Some((_, members)) => members.push(source),
+            None => groups.push((key, vec![source])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(_, mut members)| {
+            members.sort_by_key(|member| member.part_index().unwrap_or(0));
+            members
+        })
+        .collect()
+}
+
 /// Keeps the parts of one version together, in part order, and makes sure only the
 /// first part of a version can be the default source.
 fn arrange_source_parts(sources: &mut Vec<CatalogSource>) {
     if sources.len() < 2 {
         return;
     }
-    let mut groups: Vec<(String, Vec<CatalogSource>)> = Vec::new();
-    for source in sources.drain(..) {
-        let key = source.version_key();
-        match groups.iter_mut().find(|(group_key, members)| {
-            *group_key == key
-                && members.iter().any(|member| member.part_index().is_some())
-                && source.part_index().is_some()
-        }) {
-            Some((_, members)) => members.push(source),
-            None => groups.push((key, vec![source])),
-        }
-    }
-    for (_, members) in &mut groups {
-        members.sort_by_key(|member| member.part_index().unwrap_or(0));
-    }
+    let mut groups = group_source_versions(std::mem::take(sources));
     let default_group = groups
         .iter()
-        .position(|(_, members)| members.iter().any(|member| member.is_default));
-    for (_, members) in &mut groups {
-        for member in members.iter_mut() {
-            member.is_default = false;
+        .position(|members| members.iter().any(|member| member.is_default))
+        .unwrap_or(0);
+    for (index, members) in groups.iter_mut().enumerate() {
+        for (position, member) in members.iter_mut().enumerate() {
+            member.is_default = index == default_group && position == 0;
         }
     }
-    let default_group = default_group.unwrap_or(0);
-    if let Some(first) = groups
-        .get_mut(default_group)
-        .and_then(|(_, members)| members.first_mut())
-    {
-        first.is_default = true;
-    }
-    sources.extend(groups.into_iter().flat_map(|(_, members)| members));
+    sources.extend(groups.into_iter().flatten());
 }
 
 fn assemble_items(rows: Vec<StoredCatalogRow>) -> Vec<CatalogItem> {

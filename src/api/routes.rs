@@ -16,6 +16,7 @@ pub(super) fn app_with_state(state: AppState) -> Router {
         .route("/logo.svg", get(web_logo))
         .merge(users::api_routes())
         .merge(admin::api_routes())
+        .merge(version_priority_api::api_routes())
         .merge(lux_api::api_routes())
         .merge(emby::api_routes())
         .nest("/emby", emby::api_routes())
