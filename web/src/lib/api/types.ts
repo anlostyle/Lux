@@ -1060,3 +1060,41 @@ export type ApiErrorBody = {
     requestId?: string;
   };
 };
+
+export type VersionPriorityMode = "default" | "quality" | "custom" | "inherit";
+export type VersionPrioritySubtitle = "prefer" | "avoid" | "ignore";
+export type VersionPriorityTieBreaker = "resolution" | "hdr" | "codec" | "bitrate" | "size";
+
+export type VersionPriorityRule = {
+  mode: VersionPriorityMode;
+  custom?: {
+    keywordGroups: string[][];
+    subtitle: VersionPrioritySubtitle;
+    subtitleKeywords: string[];
+    tieBreakers: VersionPriorityTieBreaker[];
+  };
+};
+
+export type LibraryVersionPriority = { libraryId: string; rule: VersionPriorityRule };
+
+export type UserVersionPriority = {
+  canCustomize: boolean;
+  /** Keyed by library id or "*" for every library. */
+  rules: Record<string, VersionPriorityRule>;
+};
+
+export type VersionPriorityPreview = {
+  itemId: string;
+  title: string;
+  sources: Array<{
+    id: string;
+    fileName?: string | null;
+    editionName?: string | null;
+    qualityLabel?: string | null;
+    versionKey: string;
+    partIndex?: number | null;
+    isDefault: boolean;
+    size?: number | null;
+    bitrate?: number | null;
+  }>;
+};

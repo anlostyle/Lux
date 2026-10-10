@@ -73,6 +73,10 @@ import type {
   SetupDatabaseStatus,
   MetadataRefreshMode,
   UserPlaybackSettings,
+  LibraryVersionPriority,
+  UserVersionPriority,
+  VersionPriorityPreview,
+  VersionPriorityRule,
 } from "./types";
 
 const csrfCookie = "lux_csrf";
@@ -342,6 +346,57 @@ export class LuxApiClient {
       method: "PATCH",
       body: JSON.stringify(input),
     });
+  }
+
+  versionPriority() {
+    return this.request<UserVersionPriority>("/api/v1/auth/version-priority");
+  }
+
+  updateVersionPriority(scope: string, rule: VersionPriorityRule) {
+    return this.request<UserVersionPriority>("/api/v1/auth/version-priority", {
+      method: "PUT",
+      body: JSON.stringify({ scope, rule }),
+    });
+  }
+
+  previewVersionPriority(itemId: string, rule?: VersionPriorityRule) {
+    return this.request<VersionPriorityPreview>("/api/v1/auth/version-priority/preview", {
+      method: "POST",
+      body: JSON.stringify({ itemId, rule }),
+    });
+  }
+
+  adminLibraryVersionPriority(libraryId: string) {
+    return this.request<LibraryVersionPriority>(
+      `/api/v1/admin/libraries/${encodeURIComponent(libraryId)}/version-priority`,
+    );
+  }
+
+  updateAdminLibraryVersionPriority(libraryId: string, rule: VersionPriorityRule) {
+    return this.request<LibraryVersionPriority>(
+      `/api/v1/admin/libraries/${encodeURIComponent(libraryId)}/version-priority`,
+      { method: "PUT", body: JSON.stringify(rule) },
+    );
+  }
+
+  previewAdminLibraryVersionPriority(libraryId: string, itemId: string, rule?: VersionPriorityRule) {
+    return this.request<VersionPriorityPreview>(
+      `/api/v1/admin/libraries/${encodeURIComponent(libraryId)}/version-priority/preview`,
+      { method: "POST", body: JSON.stringify({ itemId, rule }) },
+    );
+  }
+
+  adminUserVersionPriority(userId: string) {
+    return this.request<UserVersionPriority>(
+      `/api/v1/admin/users/${encodeURIComponent(userId)}/version-priority`,
+    );
+  }
+
+  updateAdminUserVersionPriority(userId: string, canCustomize: boolean) {
+    return this.request<{ canCustomize: boolean }>(
+      `/api/v1/admin/users/${encodeURIComponent(userId)}/version-priority`,
+      { method: "PUT", body: JSON.stringify({ canCustomize }) },
+    );
   }
 
   adminApiKey() {

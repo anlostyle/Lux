@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronUp,
   GripVertical,
+  Layers,
   LogOut,
   Monitor,
   Moon,
@@ -19,6 +20,7 @@ import { api } from "../../lib/api/client";
 import { queryKeys } from "../../lib/api/query-keys";
 import type { Library, LuxUser } from "../../lib/api/types";
 import { LuxSelect } from "../../components/LuxSelect";
+import { UserVersionPrioritySettings } from "../media/VersionPrioritySettings";
 import { useAvatar } from "../../components/layout/LuxShell";
 import { calculateAvatarCrop, cropAvatarImage, DEFAULT_AVATAR_CROP, type AvatarCrop } from "./avatar-image";
 import {
@@ -35,6 +37,7 @@ export function AccountPage({ user }: { user: LuxUser }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const libraries = useQuery({ queryKey: queryKeys.libraries, queryFn: () => api.libraries() });
+  const versionPriority = useQuery({ queryKey: ["version-priority", "me"], queryFn: () => api.versionPriority() });
   const playbackSettings = useQuery({ queryKey: queryKeys.userSettings, queryFn: () => api.userSettings() });
   const libraryOrder = useQuery({ queryKey: queryKeys.libraryOrder, queryFn: () => api.libraryOrder() });
   const { avatarUrl, setAvatarUrl } = useAvatar();
@@ -451,6 +454,12 @@ export function AccountPage({ user }: { user: LuxUser }) {
               </form>
             </div>
           </SettingsSection>
+
+          {versionPriority.data?.canCustomize ? (
+            <SettingsSection id="version-priority" icon={<Layers size={18} />} title="多版本优先">
+              <UserVersionPrioritySettings libraries={orderedLibraries.map((library) => ({ id: library.id, name: library.name }))} />
+            </SettingsSection>
+          ) : null}
 
           <SettingsSection id="account" icon={<UserRound size={18} />} title="账户">
             <div className="lux-account-profile-editor">

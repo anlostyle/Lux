@@ -1,0 +1,83 @@
+.lux-version-priority-editor {
+  display: grid;
+  gap: 16px;
+}
+
+.lux-version-priority-keywords {
+  flex: 1;
+  min-width: 0;
+}
+
+.lux-version-priority-tie-breakers {
+  display: grid;
+  gap: 8px;
+}
+
+.lux-version-priority-tie-breaker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.lux-version-priority-tie-breaker label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lux-version-priority-search {
+  display: flex;
+  gap: 8px;
+}
+
+.lux-version-priority-search input {
+  flex: 1;
+  min-width: 0;
+}
+
+.lux-version-priority-results {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.lux-version-priority-results button {
+  border: 1px solid var(--lux-line-soft);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.lux-version-priority-order {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.lux-version-priority-order li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.lux-version-priority-default {
+  font-size: 0.8em;
+  font-weight: 600;
+  color: var(--lux-accent);
+}
+
+.lux-version-priority-settings {
+  display: grid;
+  gap: 16px;
+}
+
+.lux-version-priority-settings .lux-setting-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
