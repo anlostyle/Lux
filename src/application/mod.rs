@@ -59,5 +59,6 @@ pub mod strm_target;
 pub(crate) mod thumbnail_policy;
 pub mod thumbnails;
 pub mod user_avatars;
+pub mod version_priority;
 pub mod watch;
 pub mod webhooks;

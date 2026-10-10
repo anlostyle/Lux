@@ -109,6 +109,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(_) => {}
         Err(error) => error!(%error, "episode image path repair failed"),
     }
+    if let Err(error) = database.reload_version_priority().await {
+        error!(%error, "version priority rules could not be loaded");
+    }
     match database.normalize_media_source_defaults().await {
         Ok(0) => {}
         Ok(repaired) => info!(

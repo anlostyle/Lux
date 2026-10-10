@@ -50,6 +50,8 @@ mod people;
 mod sessions;
 #[path = "users.rs"]
 mod users;
+#[path = "version_priority.rs"]
+mod version_priority;
 
 // A media_sources row uses 11 bind values. Keep each backend's positive-index batches
 // below its parameter limit while allowing PostgreSQL fewer round trips per transaction.
@@ -338,6 +340,8 @@ pub struct Database {
     metadata_write_lock: Arc<AsyncMutex<()>>,
     recommendation_stats_refresh_lock: Arc<AsyncMutex<()>>,
     recommendation_rating_median_cache: Arc<AsyncMutex<RecommendationRatingMedianCache>>,
+    version_priority:
+        Arc<std::sync::RwLock<Arc<crate::application::version_priority::VersionPrioritySnapshot>>>,
     #[cfg(test)]
     query_count: Arc<AtomicUsize>,
 }
@@ -465,6 +469,7 @@ impl Database {
             person_credits_write_lock: Arc::new(AsyncMutex::new(())),
             metadata_write_lock: Arc::new(AsyncMutex::new(())),
             recommendation_stats_refresh_lock: Arc::new(AsyncMutex::new(())),
+            version_priority: Default::default(),
             recommendation_rating_median_cache: Arc::new(AsyncMutex::new(
                 RecommendationRatingMedianCache::default(),
             )),

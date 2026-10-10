@@ -154,6 +154,8 @@ mod lux_api;
 mod routes;
 #[path = "users.rs"]
 mod users;
+#[path = "version_priority_api.rs"]
+mod version_priority_api;
 
 const ADMIN_HEALTH_PROBE_CACHE_TTL: Duration = Duration::from_secs(30);
 
