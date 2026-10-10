@@ -3,6 +3,7 @@ import { Ban, Check, KeyRound, Plus, ShieldCheck, Trash2, UserCheck, UserRound, 
 import { FormEvent, useState } from "react";
 import { api } from "../../lib/api/client";
 import { queryKeys } from "../../lib/api/query-keys";
+import { UserVersionPriorityPermission } from "../media/VersionPrioritySettings";
 import type { AdminUser } from "../../lib/api/types";
 
 export function AdminUsersPage() {
@@ -130,6 +131,7 @@ function UserAdminRow({ user, libraryIds, libraryNames }: { user: AdminUser; lib
             <PermissionToggle label="服务器管理" checked={user.canManageServer} onChange={(checked) => update.mutate({ canManageServer: checked })} />
             <PermissionToggle label="远程访问" checked={user.canRemoteAccess} onChange={(checked) => update.mutate({ canRemoteAccess: checked })} />
             <PermissionToggle label="允许下载" checked={user.canDownload} onChange={(checked) => update.mutate({ canDownload: checked })} />
+            <UserVersionPriorityPermission userId={user.id} isAdmin={Boolean(user.isAdmin)} />
             <PermissionToggle label="账户启用" checked={!user.isDisabled} onChange={(checked) => update.mutate({ isDisabled: !checked })} />
           </div>
           <div className="lux-admin-access-block">
